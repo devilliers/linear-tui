@@ -658,7 +658,7 @@ func (a *App) rebuildNavigationTree(teams []linearapi.Team) {
 			ref, ok := child.GetReference().(*NavigationNode)
 			if ok && ref.IsTeam && strings.ToLower(ref.Text) == defaultTeamLower {
 				a.navigationTree.SetCurrentNode(child)
-				a.selectedNavigation = ref
+				a.onNavigationSelected(ref)
 				logger.Info("tui.app: auto-selected default team team=%s", ref.Text)
 				return
 			}
