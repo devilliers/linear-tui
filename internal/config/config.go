@@ -87,6 +87,9 @@ type Config struct {
 
 	// AgentWorkspace is the default workspace path for agent runs.
 	AgentWorkspace string
+
+	// DefaultTeam is the team name to auto-select on startup.
+	DefaultTeam string
 }
 
 // LoadFromEnv loads configuration from environment variables.
