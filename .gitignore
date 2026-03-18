@@ -40,3 +40,4 @@ go.work.sum
 dist/
 .docs
 .gocache/
+.trees/

@@ -25,6 +25,7 @@ type SettingsFile struct {
 	AgentSandbox   *string `json:"agent_sandbox"`
 	AgentModel     *string `json:"agent_model"`
 	AgentWorkspace *string `json:"agent_workspace"`
+	DefaultTeam    *string `json:"default_team"`
 }
 
 // Settings contains concrete settings values for UI and persistence.
@@ -42,6 +43,7 @@ type Settings struct {
 	AgentSandbox   string `json:"agent_sandbox"`
 	AgentModel     string `json:"agent_model"`
 	AgentWorkspace string `json:"agent_workspace"`
+	DefaultTeam    string `json:"default_team"`
 }
 
 // DefaultSettings returns the default settings for the config file and UI.
@@ -79,6 +81,7 @@ func SettingsFromConfig(cfg Config) Settings {
 		AgentSandbox:   cfg.AgentSandbox,
 		AgentModel:     cfg.AgentModel,
 		AgentWorkspace: cfg.AgentWorkspace,
+		DefaultTeam:    cfg.DefaultTeam,
 	}
 }
 
@@ -150,6 +153,7 @@ func ConfigFromSettings(apiKey string, settings Settings) (Config, error) {
 		AgentSandbox:   settings.AgentSandbox,
 		AgentModel:     settings.AgentModel,
 		AgentWorkspace: settings.AgentWorkspace,
+		DefaultTeam:    settings.DefaultTeam,
 	}, nil
 }
 
@@ -238,6 +242,9 @@ func LoadSettings(path string) (Settings, error) {
 	}
 	if file.AgentWorkspace != nil {
 		settings.AgentWorkspace = *file.AgentWorkspace
+	}
+	if file.DefaultTeam != nil {
+		settings.DefaultTeam = *file.DefaultTeam
 	}
 
 	return settings, nil

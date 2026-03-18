@@ -785,47 +785,7 @@ func DefaultCommands(app *App) []Command {
 				issues := a.issues
 				a.issuesMu.RUnlock()
 				ExpandAll(a.expandedState, issues)
-				// Rebuild rows for both sections
-				currentUserID := ""
-				if a.currentUser != nil {
-					currentUserID = a.currentUser.ID
-				}
-				myIssues, otherIssues := splitIssuesByAssignee(issues, currentUserID)
-				a.myIssueRows, a.myIDToIssue = BuildIssueRows(myIssues, a.expandedState)
-				a.otherIssueRows, a.otherIDToIssue = BuildIssueRows(otherIssues, a.expandedState)
-
-				// Legacy: keep old fields for backward compatibility
-				a.issueRows = make([]IssueRow, 0, len(a.myIssueRows)+len(a.otherIssueRows))
-				a.issueRows = append(a.issueRows, a.myIssueRows...)
-				a.issueRows = append(a.issueRows, a.otherIssueRows...)
-				a.idToIssue = make(map[string]*linearapi.Issue)
-				for k, v := range a.myIDToIssue {
-					a.idToIssue[k] = v
-				}
-				for k, v := range a.otherIDToIssue {
-					a.idToIssue[k] = v
-				}
-
-				// Update layout
-				a.updateIssuesColumnLayout()
-
-				// Render both tables, preserving selection
-				var selectedMyIssueID, selectedOtherIssueID string
-				a.issuesMu.RLock()
-				selectedIssue := a.selectedIssue
-				a.issuesMu.RUnlock()
-				if selectedIssue != nil {
-					if _, ok := a.myIDToIssue[selectedIssue.ID]; ok {
-						selectedMyIssueID = selectedIssue.ID
-						a.activeIssuesSection = IssuesSectionMy
-					} else if _, ok := a.otherIDToIssue[selectedIssue.ID]; ok {
-						selectedOtherIssueID = selectedIssue.ID
-						a.activeIssuesSection = IssuesSectionOther
-					}
-				}
-
-				renderIssuesTableModel(a.myIssuesTable, a.myIssueRows, a.myIDToIssue, selectedMyIssueID, a.theme)
-				renderIssuesTableModel(a.otherIssuesTable, a.otherIssueRows, a.otherIDToIssue, selectedOtherIssueID, a.theme)
+				a.rebuildAndRenderGroups()
 			},
 		},
 		{
@@ -835,50 +795,52 @@ func DefaultCommands(app *App) []Command {
 			ShortcutRune: '[',
 			Run: func(a *App) {
 				CollapseAll(a.expandedState)
-				// Rebuild rows for both sections
-				currentUserID := ""
-				if a.currentUser != nil {
-					currentUserID = a.currentUser.ID
-				}
-				a.issuesMu.RLock()
-				issues := a.issues
-				a.issuesMu.RUnlock()
-				myIssues, otherIssues := splitIssuesByAssignee(issues, currentUserID)
-				a.myIssueRows, a.myIDToIssue = BuildIssueRows(myIssues, a.expandedState)
-				a.otherIssueRows, a.otherIDToIssue = BuildIssueRows(otherIssues, a.expandedState)
-
-				// Legacy: keep old fields for backward compatibility
-				a.issueRows = make([]IssueRow, 0, len(a.myIssueRows)+len(a.otherIssueRows))
-				a.issueRows = append(a.issueRows, a.myIssueRows...)
-				a.issueRows = append(a.issueRows, a.otherIssueRows...)
-				a.idToIssue = make(map[string]*linearapi.Issue)
-				for k, v := range a.myIDToIssue {
-					a.idToIssue[k] = v
-				}
-				for k, v := range a.otherIDToIssue {
-					a.idToIssue[k] = v
-				}
-
-				// Update layout
-				a.updateIssuesColumnLayout()
-
-				// Render both tables, preserving selection
-				var selectedMyIssueID, selectedOtherIssueID string
-				a.issuesMu.RLock()
-				selectedIssue := a.selectedIssue
-				a.issuesMu.RUnlock()
-				if selectedIssue != nil {
-					if _, ok := a.myIDToIssue[selectedIssue.ID]; ok {
-						selectedMyIssueID = selectedIssue.ID
-						a.activeIssuesSection = IssuesSectionMy
-					} else if _, ok := a.otherIDToIssue[selectedIssue.ID]; ok {
-						selectedOtherIssueID = selectedIssue.ID
-						a.activeIssuesSection = IssuesSectionOther
-					}
-				}
-
-				renderIssuesTableModel(a.myIssuesTable, a.myIssueRows, a.myIDToIssue, selectedMyIssueID, a.theme)
-				renderIssuesTableModel(a.otherIssuesTable, a.otherIssueRows, a.otherIDToIssue, selectedOtherIssueID, a.theme)
+				a.rebuildAndRenderGroups()
+			},
+		},
+		{
+			ID:           "hide_completed",
+			Title:        "Toggle hide completed/canceled",
+			Keywords:     []string{"hide", "completed", "done", "canceled", "active", "filter", "exclude"},
+			ShortcutRune: 'f',
+			Run: func(a *App) {
+				a.toggleHideCompleted()
+			},
+		},
+		{
+			ID:           "group_none",
+			Title:        "Group by: None (My/Other)",
+			Keywords:     []string{"group", "none", "default", "my", "other"},
+			ShortcutRune: '1',
+			Run: func(a *App) {
+				a.setGroupBy(GroupByNone)
+			},
+		},
+		{
+			ID:           "group_assignee",
+			Title:        "Group by: Assignee",
+			Keywords:     []string{"group", "assignee", "person", "member", "user", "standup"},
+			ShortcutRune: '2',
+			Run: func(a *App) {
+				a.setGroupBy(GroupByAssignee)
+			},
+		},
+		{
+			ID:           "group_status",
+			Title:        "Group by: Status",
+			Keywords:     []string{"group", "status", "state", "workflow"},
+			ShortcutRune: '3',
+			Run: func(a *App) {
+				a.setGroupBy(GroupByStatus)
+			},
+		},
+		{
+			ID:           "group_priority",
+			Title:        "Group by: Priority",
+			Keywords:     []string{"group", "priority", "urgent", "high", "low"},
+			ShortcutRune: '4',
+			Run: func(a *App) {
+				a.setGroupBy(GroupByPriority)
 			},
 		},
 		{

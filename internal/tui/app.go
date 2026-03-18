@@ -141,6 +141,16 @@ func formatNumberFilterSummary(filter linearapi.NumberFilter) string {
 	}
 }
 
+// issueGroupState holds the per-group table, rows and lookup map.
+type issueGroupState struct {
+	key       string                      // unique group key
+	title     string                      // display title for the table border
+	table     *tview.Table                // the tview table widget
+	rows      []IssueRow                  // flattened rows for rendering
+	idToIssue map[string]*linearapi.Issue // quick lookup by issue ID
+	issues    []linearapi.Issue           // raw issues in this group
+}
+
 // App is the main application controller that manages all UI components.
 type App struct {
 	app       *tview.Application
@@ -156,9 +166,7 @@ type App struct {
 	mainLayout             *tview.Flex
 	navigationTree         *tview.TreeView
 	issuesTable            *tview.Table // Legacy - kept for backward compatibility during migration
-	myIssuesTable          *tview.Table
-	otherIssuesTable       *tview.Table
-	issuesColumn           *tview.Flex     // Vertical flex containing My/Other tables
+	issuesColumn           *tview.Flex  // Vertical flex containing group tables
 	detailsView            *tview.Flex     // Flex container for details (description + comments)
 	detailsDescriptionView *tview.TextView // Scrollable description/metadata view
 	detailsCommentsView    *tview.TextView // Scrollable comments view
@@ -184,28 +192,27 @@ type App struct {
 	agentPromptTemplates   []config.AgentPromptTemplate
 
 	// App state (protected by issuesMu)
-	issuesMu            sync.RWMutex
-	selectedIssue       *linearapi.Issue
-	selectedNavigation  *NavigationNode
-	issues              []linearapi.Issue
-	focusedPane         FocusTarget
-	activeIssuesSection IssuesSection // Tracks which issues section (My/Other) is currently active
+	issuesMu           sync.RWMutex
+	selectedIssue      *linearapi.Issue
+	selectedNavigation *NavigationNode
+	issues             []linearapi.Issue
+	focusedPane        FocusTarget
+	activeGroupIndex   int // Tracks which issue group section is currently active
 
 	// Issue tree state (for sub-issue hierarchy)
 	// Legacy fields - kept for backward compatibility during migration
 	issueRows []IssueRow                  // Flattened rows for table rendering
 	idToIssue map[string]*linearapi.Issue // Quick lookup by issue ID
-	// Per-section issue tree state
-	myIssueRows    []IssueRow                  // Flattened rows for "My Issues" table
-	myIDToIssue    map[string]*linearapi.Issue // Quick lookup by issue ID for "My Issues"
-	otherIssueRows []IssueRow                  // Flattened rows for "Other Issues" table
-	otherIDToIssue map[string]*linearapi.Issue // Quick lookup by issue ID for "Other Issues"
-	expandedState  map[string]bool             // Expanded state for parent issues (shared across sections)
+	// Dynamic issue groups (replaces hardcoded my/other split)
+	issueGroups   []issueGroupState // One entry per visible group
+	expandedState map[string]bool   // Expanded state for parent issues (shared across groups)
 
-	// Filter/sort state
+	// Filter/sort/group state
 	searchQuery   string
 	richFilters   IssueFilters
 	sortField     SortField
+	groupBy       GroupByField
+	hideCompleted bool // When true, issues with completed/canceled states are hidden
 	statusMessage string
 
 	searchDebounceTimer      *time.Timer
@@ -280,11 +287,9 @@ func NewApp(api *linearapi.Client, cfg config.Config, templates []config.AgentPr
 		pages:                tview.NewPages(),
 		focusedPane:          FocusNavigation,
 		sortField:            SortByUpdatedAt,
+		groupBy:              GroupByNone,
 		expandedState:        make(map[string]bool),
 		idToIssue:            make(map[string]*linearapi.Issue),
-		myIDToIssue:          make(map[string]*linearapi.Issue),
-		otherIDToIssue:       make(map[string]*linearapi.Issue),
-		activeIssuesSection:  IssuesSectionOther, // Default to Other section
 		agentPromptTemplates: templates,
 	}
 
@@ -413,13 +418,12 @@ func (a *App) applyThemeToComponents() {
 		a.recolorNavigationTree()
 	}
 
-	if a.myIssuesTable != nil {
-		a.applyIssuesTableTheme(a.myIssuesTable)
-		renderIssuesTableModel(a.myIssuesTable, a.myIssueRows, a.myIDToIssue, a.selectedIssueID(IssuesSectionMy), a.theme)
-	}
-	if a.otherIssuesTable != nil {
-		a.applyIssuesTableTheme(a.otherIssuesTable)
-		renderIssuesTableModel(a.otherIssuesTable, a.otherIssueRows, a.otherIDToIssue, a.selectedIssueID(IssuesSectionOther), a.theme)
+	for i := range a.issueGroups {
+		g := &a.issueGroups[i]
+		if g.table != nil {
+			a.applyIssuesTableTheme(g.table)
+			renderIssuesTableModel(g.table, g.rows, g.idToIssue, a.selectedIssueIDForGroup(i), a.theme)
+		}
 	}
 
 	if a.detailsDescriptionView != nil {
@@ -527,22 +531,19 @@ func (a *App) applyNavigationNodeColors(node *tview.TreeNode) {
 	}
 }
 
-func (a *App) selectedIssueID(section IssuesSection) string {
-	var table *tview.Table
-	switch section {
-	case IssuesSectionMy:
-		table = a.myIssuesTable
-	case IssuesSectionOther:
-		table = a.otherIssuesTable
-	}
-	if table == nil {
+func (a *App) selectedIssueIDForGroup(groupIdx int) string {
+	if groupIdx < 0 || groupIdx >= len(a.issueGroups) {
 		return ""
 	}
-	row, _ := table.GetSelection()
+	g := &a.issueGroups[groupIdx]
+	if g.table == nil {
+		return ""
+	}
+	row, _ := g.table.GetSelection()
 	if row <= 0 {
 		return ""
 	}
-	issue := a.getIssueFromRowForSection(row, section)
+	issue := a.getIssueFromRowForSection(row, groupIdx)
 	if issue == nil {
 		return ""
 	}
@@ -556,10 +557,11 @@ func (a *App) resetCachedState() {
 	a.issues = nil
 	a.issueRows = nil
 	a.idToIssue = make(map[string]*linearapi.Issue)
-	a.myIssueRows = nil
-	a.myIDToIssue = make(map[string]*linearapi.Issue)
-	a.otherIssueRows = nil
-	a.otherIDToIssue = make(map[string]*linearapi.Issue)
+	for i := range a.issueGroups {
+		a.issueGroups[i].rows = nil
+		a.issueGroups[i].idToIssue = make(map[string]*linearapi.Issue)
+		a.issueGroups[i].issues = nil
+	}
 	a.issuesMu.Unlock()
 
 	a.selectedNavigation = nil
@@ -571,7 +573,7 @@ func (a *App) resetCachedState() {
 	a.richFilters = IssueFilters{}
 	a.searchQuery = ""
 	a.cancelSearchDebounce()
-	a.activeIssuesSection = IssuesSectionOther
+	a.activeGroupIndex = 0
 	a.expandedState = make(map[string]bool)
 
 	a.isLoading = false
@@ -648,6 +650,22 @@ func (a *App) rebuildNavigationTree(teams []linearapi.Team) {
 	}
 
 	a.navigationTree.SetRoot(root)
+
+	// Auto-select the default team if configured
+	if a.config.DefaultTeam != "" {
+		defaultTeamLower := strings.ToLower(strings.TrimSpace(a.config.DefaultTeam))
+		for _, child := range root.GetChildren() {
+			ref, ok := child.GetReference().(*NavigationNode)
+			if ok && ref.IsTeam && strings.ToLower(ref.Text) == defaultTeamLower {
+				a.navigationTree.SetCurrentNode(child)
+				a.selectedNavigation = ref
+				logger.Info("tui.app: auto-selected default team team=%s", ref.Text)
+				return
+			}
+		}
+		logger.Warning("tui.app: default team %q not found in teams list", a.config.DefaultTeam)
+	}
+
 	a.navigationTree.SetCurrentNode(allIssues)
 	a.selectedNavigation = &NavigationNode{ID: "all", Text: "All Issues"}
 }
@@ -826,15 +844,19 @@ func cycleNavigationRank(cycle linearapi.Cycle) int {
 func (a *App) buildLayout() {
 	// Build all panes
 	a.navigationTree = a.buildNavigationTree()
-	// Build My Issues and Other Issues tables
-	a.myIssuesTable = a.buildIssuesTable(" My Issues ", IssuesSectionMy)
-	a.otherIssuesTable = a.buildIssuesTable(" Other Issues ", IssuesSectionOther)
+	// Create a single initial group table
+	initialTable := a.buildIssuesTable(" Issues ", 0)
+	a.issueGroups = []issueGroupState{{
+		key:       "_default",
+		title:     "Issues",
+		table:     initialTable,
+		idToIssue: make(map[string]*linearapi.Issue),
+	}}
 	// Create vertical flex for issues column
 	a.issuesColumn = tview.NewFlex().SetDirection(tview.FlexRow)
-	// Initially show only Other Issues table (My Issues will be added when issues are loaded)
-	a.issuesColumn.AddItem(a.otherIssuesTable, 0, 1, false)
+	a.issuesColumn.AddItem(initialTable, 0, 1, false)
 	// Legacy table for backward compatibility (will be removed after migration)
-	a.issuesTable = a.otherIssuesTable
+	a.issuesTable = initialTable
 	a.detailsView = a.buildDetailsView()
 	a.statusBar = a.buildStatusBar()
 
@@ -1130,13 +1152,13 @@ func (a *App) handlePaletteKey(event *tcell.EventKey) *tcell.EventKey {
 			return nil
 		}
 		return nil
-	case tcell.KeyUp:
+	case tcell.KeyUp, tcell.KeyCtrlK:
 		if !a.paletteCtrl.IsSearchMode() {
 			a.paletteCtrl.MoveCursorUp()
 			a.updatePaletteList()
 		}
 		return nil
-	case tcell.KeyDown:
+	case tcell.KeyDown, tcell.KeyCtrlJ:
 		if !a.paletteCtrl.IsSearchMode() {
 			a.paletteCtrl.MoveCursorDown()
 			a.updatePaletteList()
@@ -1169,107 +1191,81 @@ func (a *App) handlePaletteKey(event *tcell.EventKey) *tcell.EventKey {
 }
 
 // cyclePanesForward cycles focus forward through panes.
-// When in Issues pane, cycles: My Issues -> Other Issues -> Details
+// When in Issues pane, cycles through all groups, then to Details.
 // Otherwise cycles: Navigation -> Issues -> Details -> Navigation
 func (a *App) cyclePanesForward() {
 	switch a.focusedPane {
 	case FocusNavigation:
 		a.focusedPane = FocusIssues
-		// Set to My Issues if available, otherwise Other Issues
-		if len(a.myIssueRows) > 0 {
-			a.activeIssuesSection = IssuesSectionMy
-		} else {
-			a.activeIssuesSection = IssuesSectionOther
-		}
+		a.activeGroupIndex = a.firstNonEmptyGroup()
 	case FocusIssues:
-		// If both My and Other issues exist, switch between them
-		if len(a.myIssueRows) > 0 && len(a.otherIssueRows) > 0 {
-			if a.activeIssuesSection == IssuesSectionMy {
-				// Switch from My Issues to Other Issues
-				a.activeIssuesSection = IssuesSectionOther
-			} else {
-				// Switch from Other Issues to Details pane
-				a.focusedPane = FocusDetails
-				a.focusedDetailsView = false // Start with description
-			}
+		// Try to advance to the next non-empty group
+		next := a.nextNonEmptyGroup(a.activeGroupIndex)
+		if next > a.activeGroupIndex {
+			a.activeGroupIndex = next
 		} else {
-			// Only one section exists, move to Details
 			a.focusedPane = FocusDetails
-			a.focusedDetailsView = false // Start with description
+			a.focusedDetailsView = false
 		}
 	case FocusDetails:
 		a.focusedPane = FocusNavigation
-		// FocusPalette is excluded from cycling
 	}
 	a.updateFocus()
 }
 
 // cyclePanesBackward cycles focus backward through panes.
-// When in Issues pane, cycles: Other Issues -> My Issues -> Navigation
-// Otherwise cycles: Details -> Issues (My Issues preferred) -> Navigation -> Details
+// When in Issues pane, cycles backward through groups, then to Navigation.
+// Otherwise cycles: Details -> Issues (first group) -> Navigation -> Details
 func (a *App) cyclePanesBackward() {
 	switch a.focusedPane {
 	case FocusNavigation:
 		a.focusedPane = FocusDetails
-		a.focusedDetailsView = false // Start with description
+		a.focusedDetailsView = false
 	case FocusIssues:
-		// If both My and Other issues exist, switch between them
-		if len(a.myIssueRows) > 0 && len(a.otherIssueRows) > 0 {
-			if a.activeIssuesSection == IssuesSectionOther {
-				// Switch from Other Issues to My Issues
-				a.activeIssuesSection = IssuesSectionMy
-			} else {
-				// Switch from My Issues to Navigation pane
-				a.focusedPane = FocusNavigation
-			}
+		prev := a.prevNonEmptyGroup(a.activeGroupIndex)
+		if prev < a.activeGroupIndex {
+			a.activeGroupIndex = prev
 		} else {
-			// Only one section exists, move to Navigation
 			a.focusedPane = FocusNavigation
 		}
 	case FocusDetails:
 		a.focusedPane = FocusIssues
-		// Set to My Issues if available, otherwise Other Issues (consistent with forward cycle)
-		if len(a.myIssueRows) > 0 {
-			a.activeIssuesSection = IssuesSectionMy
-		} else {
-			a.activeIssuesSection = IssuesSectionOther
-		}
-		// FocusPalette is excluded from cycling
+		a.activeGroupIndex = a.firstNonEmptyGroup()
 	}
 	a.updateFocus()
 }
 
 // updateFocus updates the focus state of all panes.
 func (a *App) updateFocus() {
+	// Helper to set all group table borders to unfocused
+	unfocusAllGroups := func() {
+		for i := range a.issueGroups {
+			a.issueGroups[i].table.SetBorderColor(a.theme.Border)
+		}
+	}
+
 	switch a.focusedPane {
 	case FocusNavigation:
 		a.app.SetFocus(a.navigationTree)
 		a.navigationTree.SetBorderColor(a.theme.BorderFocus)
-		a.myIssuesTable.SetBorderColor(a.theme.Border)
-		a.otherIssuesTable.SetBorderColor(a.theme.Border)
+		unfocusAllGroups()
 		a.detailsDescriptionView.SetBorderColor(a.theme.Border)
 		a.detailsCommentsView.SetBorderColor(a.theme.Border)
-		// Update all pane titles
 		a.updateAllPaneTitles()
 	case FocusIssues:
-		// Focus the active issues section
-		if a.activeIssuesSection == IssuesSectionMy && len(a.myIssueRows) > 0 {
-			a.app.SetFocus(a.myIssuesTable)
-			a.myIssuesTable.SetBorderColor(a.theme.BorderFocus)
-			a.otherIssuesTable.SetBorderColor(a.theme.Border)
-		} else {
-			a.app.SetFocus(a.otherIssuesTable)
-			a.myIssuesTable.SetBorderColor(a.theme.Border)
-			a.otherIssuesTable.SetBorderColor(a.theme.BorderFocus)
-			a.activeIssuesSection = IssuesSectionOther
+		unfocusAllGroups()
+		if a.activeGroupIndex >= 0 && a.activeGroupIndex < len(a.issueGroups) {
+			g := &a.issueGroups[a.activeGroupIndex]
+			if len(g.rows) > 0 {
+				a.app.SetFocus(g.table)
+				g.table.SetBorderColor(a.theme.BorderFocus)
+			}
 		}
-		// Update all pane titles
 		a.updateAllPaneTitles()
 		a.navigationTree.SetBorderColor(a.theme.Border)
 		a.detailsDescriptionView.SetBorderColor(a.theme.Border)
 		a.detailsCommentsView.SetBorderColor(a.theme.Border)
 	case FocusDetails:
-		// Focus the appropriate sub-view based on state
 		if !a.detailsCommentsVisible {
 			a.focusedDetailsView = false
 		}
@@ -1283,18 +1279,14 @@ func (a *App) updateFocus() {
 			a.detailsCommentsView.SetBorderColor(a.theme.Border)
 		}
 		a.navigationTree.SetBorderColor(a.theme.Border)
-		a.myIssuesTable.SetBorderColor(a.theme.Border)
-		a.otherIssuesTable.SetBorderColor(a.theme.Border)
-		// Update all pane titles
+		unfocusAllGroups()
 		a.updateAllPaneTitles()
 	case FocusPalette:
 		a.app.SetFocus(a.paletteInput)
 		a.navigationTree.SetBorderColor(a.theme.Border)
-		a.myIssuesTable.SetBorderColor(a.theme.Border)
-		a.otherIssuesTable.SetBorderColor(a.theme.Border)
+		unfocusAllGroups()
 		a.detailsDescriptionView.SetBorderColor(a.theme.Border)
 		a.detailsCommentsView.SetBorderColor(a.theme.Border)
-		// Update all pane titles
 		a.updateAllPaneTitles()
 	}
 	a.updateStatusBar()
@@ -1311,41 +1303,17 @@ func (a *App) updateAllPaneTitles() {
 		a.navigationTree.SetTitleColor(a.theme.Foreground)
 	}
 
-	// Update Issues pane titles
+	// Update Issues group titles
 	isIssuesFocused := a.focusedPane == FocusIssues
-
-	// Update My Issues table title
-	if len(a.myIssueRows) > 0 {
-		if isIssuesFocused && a.activeIssuesSection == IssuesSectionMy {
-			// Active section: add visual indicator and accent color
-			a.myIssuesTable.SetTitle(" ▶ My Issues ")
-			a.myIssuesTable.SetTitleColor(a.theme.Accent)
+	for i := range a.issueGroups {
+		g := &a.issueGroups[i]
+		if isIssuesFocused && i == a.activeGroupIndex && len(g.rows) > 0 {
+			g.table.SetTitle(" ▶ " + g.title + " ")
+			g.table.SetTitleColor(a.theme.Accent)
 		} else {
-			// Inactive section: normal title
-			a.myIssuesTable.SetTitle(" My Issues ")
-			a.myIssuesTable.SetTitleColor(a.theme.Foreground)
+			g.table.SetTitle(" " + g.title + " ")
+			g.table.SetTitleColor(a.theme.Foreground)
 		}
-	} else {
-		// No issues in this section
-		a.myIssuesTable.SetTitle(" My Issues ")
-		a.myIssuesTable.SetTitleColor(a.theme.Foreground)
-	}
-
-	// Update Other Issues table title
-	if len(a.otherIssueRows) > 0 {
-		if isIssuesFocused && a.activeIssuesSection == IssuesSectionOther {
-			// Active section: add visual indicator and accent color
-			a.otherIssuesTable.SetTitle(" ▶ Other Issues ")
-			a.otherIssuesTable.SetTitleColor(a.theme.Accent)
-		} else {
-			// Inactive section: normal title
-			a.otherIssuesTable.SetTitle(" Other Issues ")
-			a.otherIssuesTable.SetTitleColor(a.theme.Foreground)
-		}
-	} else {
-		// No issues in this section
-		a.otherIssuesTable.SetTitle(" Other Issues ")
-		a.otherIssuesTable.SetTitleColor(a.theme.Foreground)
 	}
 
 	// Update Details pane titles
@@ -1675,16 +1643,138 @@ func (a *App) applyRichFiltersToParams(params *linearapi.FetchIssuesParams) {
 func (a *App) updateIssuesColumnLayout() {
 	a.issuesColumn.Clear()
 
-	// Add My Issues table if there are any
-	if len(a.myIssueRows) > 0 {
-		a.issuesColumn.AddItem(a.myIssuesTable, 0, 1, false)
+	hasAny := false
+	for i := range a.issueGroups {
+		g := &a.issueGroups[i]
+		if len(g.rows) > 0 {
+			a.issuesColumn.AddItem(g.table, 0, 1, false)
+			hasAny = true
+		}
+	}
+	// If no groups have rows, show the last group's table as empty placeholder
+	if !hasAny && len(a.issueGroups) > 0 {
+		last := &a.issueGroups[len(a.issueGroups)-1]
+		a.issuesColumn.AddItem(last.table, 0, 1, false)
 	}
 
-	// Always add Other Issues table
-	a.issuesColumn.AddItem(a.otherIssuesTable, 0, 1, false)
-
-	// Update all pane titles to reflect current state
 	a.updateAllPaneTitles()
+}
+
+// firstNonEmptyGroup returns the index of the first group with rows, or 0.
+func (a *App) firstNonEmptyGroup() int {
+	for i := range a.issueGroups {
+		if len(a.issueGroups[i].rows) > 0 {
+			return i
+		}
+	}
+	return 0
+}
+
+// lastNonEmptyGroup returns the index of the last group with rows, or 0.
+func (a *App) lastNonEmptyGroup() int {
+	for i := len(a.issueGroups) - 1; i >= 0; i-- {
+		if len(a.issueGroups[i].rows) > 0 {
+			return i
+		}
+	}
+	return 0
+}
+
+// nextNonEmptyGroup returns the index of the next group with rows after current.
+// Returns current if there is no next group.
+func (a *App) nextNonEmptyGroup(current int) int {
+	for i := current + 1; i < len(a.issueGroups); i++ {
+		if len(a.issueGroups[i].rows) > 0 {
+			return i
+		}
+	}
+	return current
+}
+
+// prevNonEmptyGroup returns the index of the previous group with rows before current.
+// Returns current if there is no previous group.
+func (a *App) prevNonEmptyGroup(current int) int {
+	for i := current - 1; i >= 0; i-- {
+		if len(a.issueGroups[i].rows) > 0 {
+			return i
+		}
+	}
+	return current
+}
+
+// rebuildAndRenderGroups rebuilds rows and renders all group tables, preserving selection.
+func (a *App) rebuildAndRenderGroups() {
+	a.issueRows = nil
+	a.idToIssue = make(map[string]*linearapi.Issue)
+	for i := range a.issueGroups {
+		g := &a.issueGroups[i]
+		g.rows, g.idToIssue = BuildIssueRows(g.issues, a.expandedState)
+		a.issueRows = append(a.issueRows, g.rows...)
+		for k, v := range g.idToIssue {
+			a.idToIssue[k] = v
+		}
+	}
+
+	a.updateIssuesColumnLayout()
+
+	a.issuesMu.RLock()
+	selectedIssue := a.selectedIssue
+	a.issuesMu.RUnlock()
+
+	for i := range a.issueGroups {
+		g := &a.issueGroups[i]
+		selectedID := ""
+		if selectedIssue != nil {
+			if _, ok := g.idToIssue[selectedIssue.ID]; ok {
+				selectedID = selectedIssue.ID
+				a.activeGroupIndex = i
+			}
+		}
+		renderIssuesTableModel(g.table, g.rows, g.idToIssue, selectedID, a.theme)
+	}
+}
+
+// toggleHideCompleted toggles the hide completed/canceled filter.
+func (a *App) toggleHideCompleted() {
+	a.hideCompleted = !a.hideCompleted
+	logger.Info("tui.app: hide completed toggled to %v", a.hideCompleted)
+
+	a.issuesMu.RLock()
+	targetIssueID := ""
+	if a.selectedIssue != nil {
+		targetIssueID = a.selectedIssue.ID
+	}
+	a.issuesMu.RUnlock()
+
+	selectedIssue := a.rebuildIssuesTables(targetIssueID)
+	if selectedIssue != nil {
+		a.onIssueSelected(*selectedIssue)
+	} else {
+		a.issuesMu.Lock()
+		a.selectedIssue = nil
+		a.issuesMu.Unlock()
+		a.updateDetailsView()
+	}
+	a.updateStatusBar()
+}
+
+// setGroupBy changes the grouping mode and rebuilds the issue tables.
+func (a *App) setGroupBy(groupBy GroupByField) {
+	a.groupBy = groupBy
+	logger.Info("tui.app: group by changed to %s", groupBy)
+
+	a.issuesMu.RLock()
+	targetIssueID := ""
+	if a.selectedIssue != nil {
+		targetIssueID = a.selectedIssue.ID
+	}
+	a.issuesMu.RUnlock()
+
+	selectedIssue := a.rebuildIssuesTables(targetIssueID)
+	if selectedIssue != nil {
+		a.onIssueSelected(*selectedIssue)
+	}
+	a.updateStatusBar()
 }
 
 // updateIssuesData updates the UI with new issues data.
@@ -1719,7 +1809,6 @@ func (a *App) updateIssuesData(issues []linearapi.Issue, issueID ...string) {
 
 // rebuildIssuesTables rebuilds issue rows and renders tables, returning the selected issue.
 func (a *App) rebuildIssuesTables(targetIssueID string) *linearapi.Issue {
-	// Split issues by assignee.
 	a.issuesMu.RLock()
 	issues := a.issues
 	a.issuesMu.RUnlock()
@@ -1728,69 +1817,107 @@ func (a *App) rebuildIssuesTables(targetIssueID string) *linearapi.Issue {
 	if a.currentUser != nil {
 		currentUserID = a.currentUser.ID
 	}
-	myIssues, otherIssues := splitIssuesByAssignee(issues, currentUserID)
 
-	// Build hierarchical tree rows for each section.
-	a.myIssueRows, a.myIDToIssue = BuildIssueRows(myIssues, a.expandedState)
-	a.otherIssueRows, a.otherIDToIssue = BuildIssueRows(otherIssues, a.expandedState)
+	// Filter out completed/canceled issues if enabled
+	if a.hideCompleted {
+		issues = filterActiveIssues(issues)
+	}
 
-	// Legacy: keep old fields for backward compatibility during migration.
-	a.issueRows = make([]IssueRow, 0, len(a.myIssueRows)+len(a.otherIssueRows))
-	a.issueRows = append(a.issueRows, a.myIssueRows...)
-	a.issueRows = append(a.issueRows, a.otherIssueRows...)
+	// Group issues according to current groupBy setting
+	groups := groupIssues(issues, a.groupBy, currentUserID)
+
+	// Ensure we have enough group states, reusing existing tables where possible
+	a.ensureGroupTables(groups)
+
+	// Build hierarchical tree rows for each group
+	a.issueRows = nil
 	a.idToIssue = make(map[string]*linearapi.Issue)
-	for k, v := range a.myIDToIssue {
-		a.idToIssue[k] = v
-	}
-	for k, v := range a.otherIDToIssue {
-		a.idToIssue[k] = v
+	for i := range a.issueGroups {
+		g := &a.issueGroups[i]
+		g.rows, g.idToIssue = BuildIssueRows(g.issues, a.expandedState)
+		// Legacy: accumulate for backward compatibility
+		a.issueRows = append(a.issueRows, g.rows...)
+		for k, v := range g.idToIssue {
+			a.idToIssue[k] = v
+		}
 	}
 
-	// Update layout to show/hide My Issues section.
+	// Update layout
 	a.updateIssuesColumnLayout()
 
-	// Render both tables.
-	var selectedMyIssueID, selectedOtherIssueID string
-	if targetIssueID != "" {
-		// Check which section contains the target issue.
-		if _, ok := a.myIDToIssue[targetIssueID]; ok {
-			selectedMyIssueID = targetIssueID
-			a.activeIssuesSection = IssuesSectionMy
-		} else if _, ok := a.otherIDToIssue[targetIssueID]; ok {
-			selectedOtherIssueID = targetIssueID
-			a.activeIssuesSection = IssuesSectionOther
+	// Render all group tables
+	for i := range a.issueGroups {
+		g := &a.issueGroups[i]
+		selectedID := ""
+		if targetIssueID != "" {
+			if _, ok := g.idToIssue[targetIssueID]; ok {
+				selectedID = targetIssueID
+				a.activeGroupIndex = i
+			}
 		}
+		renderIssuesTableModel(g.table, g.rows, g.idToIssue, selectedID, a.theme)
 	}
 
-	renderIssuesTableModel(a.myIssuesTable, a.myIssueRows, a.myIDToIssue, selectedMyIssueID, a.theme)
-	renderIssuesTableModel(a.otherIssuesTable, a.otherIssueRows, a.otherIDToIssue, selectedOtherIssueID, a.theme)
-
-	// Select issue and update details.
+	// Find the selected issue
 	var selectedIssue *linearapi.Issue
 	if targetIssueID != "" {
-		if issue, ok := a.myIDToIssue[targetIssueID]; ok {
-			selectedIssue = issue
-		} else if issue, ok := a.otherIDToIssue[targetIssueID]; ok {
-			selectedIssue = issue
+		for i := range a.issueGroups {
+			if issue, ok := a.issueGroups[i].idToIssue[targetIssueID]; ok {
+				selectedIssue = issue
+				break
+			}
 		}
 	}
 
-	// If no target issue, default to first available.
+	// Default to first available issue
 	if selectedIssue == nil {
-		if len(a.myIssueRows) > 0 {
-			if issue, ok := a.myIDToIssue[a.myIssueRows[0].IssueID]; ok {
-				selectedIssue = issue
-				a.activeIssuesSection = IssuesSectionMy
-			}
-		} else if len(a.otherIssueRows) > 0 {
-			if issue, ok := a.otherIDToIssue[a.otherIssueRows[0].IssueID]; ok {
-				selectedIssue = issue
-				a.activeIssuesSection = IssuesSectionOther
+		for i := range a.issueGroups {
+			g := &a.issueGroups[i]
+			if len(g.rows) > 0 {
+				if issue, ok := g.idToIssue[g.rows[0].IssueID]; ok {
+					selectedIssue = issue
+					a.activeGroupIndex = i
+					break
+				}
 			}
 		}
 	}
 
 	return selectedIssue
+}
+
+// ensureGroupTables creates/updates group states to match the provided groups.
+func (a *App) ensureGroupTables(groups []IssueGroup) {
+	// Reuse existing tables by index where possible
+	for i, group := range groups {
+		if i < len(a.issueGroups) {
+			// Reuse existing table
+			a.issueGroups[i].key = group.Key
+			a.issueGroups[i].title = group.Title
+			a.issueGroups[i].issues = group.Issues
+		} else {
+			// Create new table
+			table := a.buildIssuesTable(" "+group.Title+" ", i)
+			a.issueGroups = append(a.issueGroups, issueGroupState{
+				key:       group.Key,
+				title:     group.Title,
+				table:     table,
+				idToIssue: make(map[string]*linearapi.Issue),
+				issues:    group.Issues,
+			})
+		}
+	}
+	// Truncate if we have more groups than needed
+	if len(groups) < len(a.issueGroups) {
+		a.issueGroups = a.issueGroups[:len(groups)]
+	}
+	// Clamp active group index
+	if a.activeGroupIndex >= len(a.issueGroups) {
+		a.activeGroupIndex = len(a.issueGroups) - 1
+	}
+	if a.activeGroupIndex < 0 {
+		a.activeGroupIndex = 0
+	}
 }
 
 // appendIssuesData merges additional issues and updates rendered tables.
@@ -1824,11 +1951,7 @@ func (a *App) appendIssuesData(newIssues []linearapi.Issue) {
 
 	selectedIssue := a.rebuildIssuesTables(targetIssueID)
 	a.issuesMu.Lock()
-	if selectedIssue != nil {
-		a.selectedIssue = selectedIssue
-	} else {
-		a.selectedIssue = nil
-	}
+	a.selectedIssue = selectedIssue
 	a.issuesMu.Unlock()
 	a.updateDetailsView()
 	a.updateStatusBar()
@@ -1890,69 +2013,46 @@ func (a *App) onIssueSelected(issue linearapi.Issue) {
 
 // toggleIssueExpanded toggles the expand/collapse state of a parent issue.
 func (a *App) toggleIssueExpanded(issueID string) {
-	// Check both sections for the issue
+	// Find the issue across all groups
 	var issue *linearapi.Issue
-	var ok bool
-	if issue, ok = a.myIDToIssue[issueID]; !ok {
-		if issue, ok = a.otherIDToIssue[issueID]; !ok {
-			logger.Debug("tui.app: issue not found for toggle issue_id=%s", issueID)
-			return
+	for i := range a.issueGroups {
+		if iss, ok := a.issueGroups[i].idToIssue[issueID]; ok {
+			issue = iss
+			break
 		}
 	}
-
-	if issue == nil {
-		return
-	}
-
-	// Only toggle if this issue has children
-	if len(issue.Children) == 0 {
+	if issue == nil || len(issue.Children) == 0 {
 		return
 	}
 
 	wasExpanded := a.expandedState[issueID]
 	logger.Debug("tui.app: toggling issue expanded issue=%s was_expanded=%v", issue.Identifier, wasExpanded)
-
 	ToggleExpanded(a.expandedState, issueID)
 
-	// Rebuild rows for both sections
-	currentUserID := ""
-	if a.currentUser != nil {
-		currentUserID = a.currentUser.ID
-	}
-	a.issuesMu.RLock()
-	issues := a.issues
-	a.issuesMu.RUnlock()
-	myIssues, otherIssues := splitIssuesByAssignee(issues, currentUserID)
-	a.myIssueRows, a.myIDToIssue = BuildIssueRows(myIssues, a.expandedState)
-	a.otherIssueRows, a.otherIDToIssue = BuildIssueRows(otherIssues, a.expandedState)
-
-	// Legacy: keep old fields for backward compatibility
-	a.issueRows = make([]IssueRow, 0, len(a.myIssueRows)+len(a.otherIssueRows))
-	a.issueRows = append(a.issueRows, a.myIssueRows...)
-	a.issueRows = append(a.issueRows, a.otherIssueRows...)
+	// Rebuild rows for all groups
+	a.issueRows = nil
 	a.idToIssue = make(map[string]*linearapi.Issue)
-	for k, v := range a.myIDToIssue {
-		a.idToIssue[k] = v
-	}
-	for k, v := range a.otherIDToIssue {
-		a.idToIssue[k] = v
+	for i := range a.issueGroups {
+		g := &a.issueGroups[i]
+		g.rows, g.idToIssue = BuildIssueRows(g.issues, a.expandedState)
+		a.issueRows = append(a.issueRows, g.rows...)
+		for k, v := range g.idToIssue {
+			a.idToIssue[k] = v
+		}
 	}
 
-	// Update layout
 	a.updateIssuesColumnLayout()
 
-	// Render both tables, selecting the toggled issue
-	var selectedMyIssueID, selectedOtherIssueID string
-	if _, ok := a.myIDToIssue[issueID]; ok {
-		selectedMyIssueID = issueID
-		a.activeIssuesSection = IssuesSectionMy
-	} else if _, ok := a.otherIDToIssue[issueID]; ok {
-		selectedOtherIssueID = issueID
-		a.activeIssuesSection = IssuesSectionOther
+	// Render all group tables, selecting the toggled issue in its group
+	for i := range a.issueGroups {
+		g := &a.issueGroups[i]
+		selectedID := ""
+		if _, ok := g.idToIssue[issueID]; ok {
+			selectedID = issueID
+			a.activeGroupIndex = i
+		}
+		renderIssuesTableModel(g.table, g.rows, g.idToIssue, selectedID, a.theme)
 	}
-
-	renderIssuesTableModel(a.myIssuesTable, a.myIssueRows, a.myIDToIssue, selectedMyIssueID, a.theme)
-	renderIssuesTableModel(a.otherIssuesTable, a.otherIssueRows, a.otherIDToIssue, selectedOtherIssueID, a.theme)
 }
 
 // onNavigationSelected handles when a navigation item is selected.
@@ -2056,14 +2156,39 @@ func (a *App) updateStatusBar() {
 		searchText = fmt.Sprintf("%s🔍 %s[-]", a.themeTags.Warning, a.searchQuery)
 	}
 	filterText := ""
+	filterParts := make([]string, 0, 2)
 	if !a.richFilters.Empty() {
-		filterText = fmt.Sprintf("%sFilters: %s[-]", a.themeTags.Warning, a.richFilters.Summary())
+		filterParts = append(filterParts, a.richFilters.Summary())
+	}
+	if a.hideCompleted {
+		filterParts = append(filterParts, "hiding completed")
+	}
+	if len(filterParts) > 0 {
+		filterText = fmt.Sprintf("%sFilters: %s[-]", a.themeTags.Warning, strings.Join(filterParts, ", "))
+	}
+
+	groupText := ""
+	switch a.groupBy {
+	case GroupByAssignee:
+		groupText = fmt.Sprintf("%sGrouped by: Assignee[-]", a.themeTags.Accent)
+	case GroupByStatus:
+		groupText = fmt.Sprintf("%sGrouped by: Status[-]", a.themeTags.Accent)
+	case GroupByPriority:
+		groupText = fmt.Sprintf("%sGrouped by: Priority[-]", a.themeTags.Accent)
 	}
 
 	a.issuesMu.RLock()
 	issuesLen := len(a.issues)
 	a.issuesMu.RUnlock()
+	// Show visible count when filtering
+	visibleCount := 0
+	for i := range a.issueGroups {
+		visibleCount += len(a.issueGroups[i].rows)
+	}
 	statusText := fmt.Sprintf("%s%d issues[-]", a.themeTags.Accent, issuesLen)
+	if a.hideCompleted && visibleCount != issuesLen {
+		statusText = fmt.Sprintf("%s%d/%d issues[-]", a.themeTags.Accent, visibleCount, issuesLen)
+	}
 	if issuesLen == 0 {
 		statusText = fmt.Sprintf("%sNo issues[-]", a.themeTags.SecondaryText)
 	}
@@ -2079,6 +2204,9 @@ func (a *App) updateStatusBar() {
 	}
 	if filterText != "" {
 		parts = append(parts, filterText)
+	}
+	if groupText != "" {
+		parts = append(parts, groupText)
 	}
 	if a.statusMessage != "" {
 		parts = append(parts, fmt.Sprintf("%s%s[-]", a.themeTags.Accent, a.statusMessage))
