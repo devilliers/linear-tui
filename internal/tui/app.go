@@ -205,7 +205,8 @@ type App struct {
 	idToIssue map[string]*linearapi.Issue // Quick lookup by issue ID
 	// Dynamic issue groups (replaces hardcoded my/other split)
 	issueGroups   []issueGroupState // One entry per visible group
-	expandedState map[string]bool   // Expanded state for parent issues (shared across groups)
+	expandedState  map[string]bool // Expanded state for parent issues (shared across groups)
+	selectedIssues map[string]bool // Multi-selection: set of issue IDs selected with space
 
 	// Filter/sort/group state
 	searchQuery   string
@@ -290,6 +291,7 @@ func NewApp(api *linearapi.Client, cfg config.Config, templates []config.AgentPr
 		groupBy:              GroupByNone,
 		hideCompleted:        cfg.HideCompleted,
 		expandedState:        make(map[string]bool),
+		selectedIssues:       make(map[string]bool),
 		idToIssue:            make(map[string]*linearapi.Issue),
 		agentPromptTemplates: templates,
 	}
@@ -423,7 +425,7 @@ func (a *App) applyThemeToComponents() {
 		g := &a.issueGroups[i]
 		if g.table != nil {
 			a.applyIssuesTableTheme(g.table)
-			renderIssuesTableModel(g.table, g.rows, g.idToIssue, a.selectedIssueIDForGroup(i), a.theme)
+			renderIssuesTableModel(g.table, g.rows, g.idToIssue, a.selectedIssueIDForGroup(i), a.theme, a.selectedIssues)
 		}
 	}
 
@@ -967,6 +969,13 @@ func (a *App) bindGlobalKeys() {
 		// Global shortcuts (only when not in palette)
 		switch event.Key() {
 		case tcell.KeyEscape:
+			// Clear multi-selection first, then search
+			if len(a.selectedIssues) > 0 {
+				a.ClearSelectedIssues()
+				a.renderAllIssueGroups()
+				a.updateStatusBar()
+				return nil
+			}
 			// Clear search if active (when not in modals/palette)
 			if a.searchQuery != "" {
 				a.setSearchQuery("")
@@ -1736,7 +1745,7 @@ func (a *App) rebuildAndRenderGroups() {
 				a.activeGroupIndex = i
 			}
 		}
-		renderIssuesTableModel(g.table, g.rows, g.idToIssue, selectedID, a.theme)
+		renderIssuesTableModel(g.table, g.rows, g.idToIssue, selectedID, a.theme, a.selectedIssues)
 	}
 }
 
@@ -1861,7 +1870,7 @@ func (a *App) rebuildIssuesTables(targetIssueID string) *linearapi.Issue {
 				a.activeGroupIndex = i
 			}
 		}
-		renderIssuesTableModel(g.table, g.rows, g.idToIssue, selectedID, a.theme)
+		renderIssuesTableModel(g.table, g.rows, g.idToIssue, selectedID, a.theme, a.selectedIssues)
 	}
 
 	// Find the selected issue
@@ -2057,7 +2066,16 @@ func (a *App) toggleIssueExpanded(issueID string) {
 			selectedID = issueID
 			a.activeGroupIndex = i
 		}
-		renderIssuesTableModel(g.table, g.rows, g.idToIssue, selectedID, a.theme)
+		renderIssuesTableModel(g.table, g.rows, g.idToIssue, selectedID, a.theme, a.selectedIssues)
+	}
+}
+
+// renderAllIssueGroups re-renders all group tables preserving current selection.
+func (a *App) renderAllIssueGroups() {
+	for i := range a.issueGroups {
+		g := &a.issueGroups[i]
+		selectedID := a.selectedIssueIDForGroup(i)
+		renderIssuesTableModel(g.table, g.rows, g.idToIssue, selectedID, a.theme, a.selectedIssues)
 	}
 }
 
@@ -2065,6 +2083,7 @@ func (a *App) toggleIssueExpanded(issueID string) {
 func (a *App) onNavigationSelected(node *NavigationNode) {
 	logger.Debug("tui.app: navigation selected node_id=%s node_text=%s is_team=%v is_project=%v is_cycle=%v", node.ID, node.Text, node.IsTeam, node.IsProject, node.IsCycle)
 	a.selectedNavigation = node
+	a.ClearSelectedIssues()
 
 	// Update selected team metadata for commands and create-issue defaults.
 	if node.TeamID != "" {
@@ -2214,6 +2233,10 @@ func (a *App) updateStatusBar() {
 	if groupText != "" {
 		parts = append(parts, groupText)
 	}
+	if len(a.selectedIssues) > 0 {
+		selText := fmt.Sprintf("%s%d selected[-]", a.themeTags.Warning, len(a.selectedIssues))
+		parts = append(parts, selText)
+	}
 	if a.statusMessage != "" {
 		parts = append(parts, fmt.Sprintf("%s%s[-]", a.themeTags.Accent, a.statusMessage))
 	}
@@ -2256,6 +2279,40 @@ func (a *App) GetSelectedIssue() *linearapi.Issue {
 	a.issuesMu.RLock()
 	defer a.issuesMu.RUnlock()
 	return a.selectedIssue
+}
+
+// ToggleIssueSelected toggles multi-selection for an issue.
+func (a *App) ToggleIssueSelected(issueID string) {
+	if a.selectedIssues[issueID] {
+		delete(a.selectedIssues, issueID)
+	} else {
+		a.selectedIssues[issueID] = true
+	}
+}
+
+// ClearSelectedIssues clears all multi-selected issues.
+func (a *App) ClearSelectedIssues() {
+	a.selectedIssues = make(map[string]bool)
+}
+
+// GetSelectedOrMultiIssues returns the multi-selected issues if any, otherwise
+// returns a slice containing just the currently focused issue.
+func (a *App) GetSelectedOrMultiIssues() []linearapi.Issue {
+	if len(a.selectedIssues) > 0 {
+		var issues []linearapi.Issue
+		for _, g := range a.issueGroups {
+			for _, issue := range g.idToIssue {
+				if a.selectedIssues[issue.ID] {
+					issues = append(issues, *issue)
+				}
+			}
+		}
+		return issues
+	}
+	if issue := a.GetSelectedIssue(); issue != nil {
+		return []linearapi.Issue{*issue}
+	}
+	return nil
 }
 
 // GetSelectedTeamID returns the currently selected team ID, if any.

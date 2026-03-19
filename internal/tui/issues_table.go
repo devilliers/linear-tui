@@ -286,10 +286,9 @@ func (a *App) setupIssuesTableNavigation(table *tview.Table, groupIdx int) {
 			case ' ':
 				row, _ := table.GetSelection()
 				if issue := a.getIssueFromRowForSection(row, section); issue != nil {
-					if len(issue.Children) > 0 {
-						a.toggleIssueExpanded(issue.ID)
-						a.activeGroupIndex = section
-					}
+					a.ToggleIssueSelected(issue.ID)
+					a.renderAllIssueGroups()
+					a.updateStatusBar()
 				}
 				return nil
 			}
@@ -383,7 +382,7 @@ func (a *App) getRowForIssueInSection(issueID string, groupIdx int) int {
 }
 
 // renderIssuesTableModel renders a table with the given rows and issue lookup map.
-func renderIssuesTableModel(table *tview.Table, rows []IssueRow, idToIssue map[string]*linearapi.Issue, selectedIssueID string, theme Theme) {
+func renderIssuesTableModel(table *tview.Table, rows []IssueRow, idToIssue map[string]*linearapi.Issue, selectedIssueID string, theme Theme, multiSelected map[string]bool) {
 	table.Clear()
 
 	// Set column headers with better styling
@@ -449,22 +448,34 @@ func renderIssuesTableModel(table *tview.Table, rows []IssueRow, idToIssue map[s
 
 		// Build identifier with hierarchy indicator
 		identifier := issue.Identifier
-		identifierPrefix := " "
+		isMultiSelected := multiSelected[issue.ID]
+
+		// Selection marker
+		selectionMark := " "
+		if isMultiSelected {
+			selectionMark = "●"
+		}
+
+		identifierPrefix := selectionMark
 
 		if issueRow.Level > 0 {
 			// Child issue - show indent prefix
-			identifierPrefix = " " + IconChildPrefix + " "
+			identifierPrefix = selectionMark + IconChildPrefix + " "
 		} else if issueRow.HasChildren {
 			// Parent issue - show expand/collapse indicator
 			if issueRow.IsExpanded {
-				identifierPrefix = " " + IconExpanded + " "
+				identifierPrefix = selectionMark + IconExpanded + " "
 			} else {
-				identifierPrefix = " " + IconCollapsed + " "
+				identifierPrefix = selectionMark + IconCollapsed + " "
 			}
 		}
 
+		idColor := theme.SecondaryText
+		if isMultiSelected {
+			idColor = theme.Accent
+		}
 		table.SetCell(row, 0, tview.NewTableCell(identifierPrefix+identifier).
-			SetTextColor(theme.SecondaryText).
+			SetTextColor(idColor).
 			SetAlign(tview.AlignLeft))
 
 		// State with color based on state

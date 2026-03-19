@@ -602,27 +602,34 @@ func DefaultCommands(app *App) []Command {
 			Keywords:     []string{"status", "state", "workflow", "todo", "progress", "done"},
 			ShortcutRune: 's',
 			Run: func(a *App) {
-				issue := a.GetSelectedIssue()
-				if issue == nil {
-					a.flashStatus("No issue selected")
+				issues := a.GetSelectedOrMultiIssues()
+				if len(issues) == 0 {
 					return
 				}
 				a.ShowStatusPicker(func(stateID string) {
 					go func() {
 						ctx := context.Background()
-						_, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
-							ID:      issue.ID,
-							StateID: &stateID,
-						})
-						a.QueueUpdateDraw(func() {
+						var firstErr error
+						for _, issue := range issues {
+							_, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
+								ID:      issue.ID,
+								StateID: &stateID,
+							})
 							if err != nil {
 								logger.ErrorWithErr(err, "tui.commands: failed to change status issue=%s", issue.Identifier)
-								a.updateStatusBarWithError(err)
-								return
+								if firstErr == nil {
+									firstErr = err
+								}
+							} else {
+								logger.Info("tui.commands: changed status issue=%s", issue.Identifier)
 							}
-							logger.Info("tui.commands: changed status issue=%s", issue.Identifier)
-							a.flashStatus(fmt.Sprintf("Changed status for %s", issue.Identifier))
-							go a.refreshIssues(issue.ID)
+						}
+						a.QueueUpdateDraw(func() {
+							if firstErr != nil {
+								a.updateStatusBarWithError(firstErr)
+							}
+							a.ClearSelectedIssues()
+							go a.refreshIssues(issues[0].ID)
 						})
 					}()
 				})
@@ -684,13 +691,36 @@ func DefaultCommands(app *App) []Command {
 			Keywords:     []string{"assign", "user", "team", "member"},
 			ShortcutRune: 'a',
 			Run: func(a *App) {
-				issue := a.GetSelectedIssue()
-				if issue == nil {
-					a.flashStatus("No issue selected")
+				issues := a.GetSelectedOrMultiIssues()
+				if len(issues) == 0 {
 					return
 				}
 				a.ShowUserPicker(func(userID string) {
-					runIssueUpdateCommand(a, issue, linearapi.UpdateIssueInput{AssigneeID: &userID}, "assign issue to user", fmt.Sprintf("Assigned %s", issue.Identifier))
+					go func() {
+						ctx := context.Background()
+						var firstErr error
+						for _, issue := range issues {
+							_, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
+								ID:         issue.ID,
+								AssigneeID: &userID,
+							})
+							if err != nil {
+								logger.ErrorWithErr(err, "tui.commands: failed to assign issue to user issue=%s", issue.Identifier)
+								if firstErr == nil {
+									firstErr = err
+								}
+							} else {
+								logger.Info("tui.commands: assigned issue to user issue=%s", issue.Identifier)
+							}
+						}
+						a.QueueUpdateDraw(func() {
+							if firstErr != nil {
+								a.updateStatusBarWithError(firstErr)
+							}
+							a.ClearSelectedIssues()
+							go a.refreshIssues(issues[0].ID)
+						})
+					}()
 				})
 			},
 		},
@@ -796,6 +826,16 @@ func DefaultCommands(app *App) []Command {
 			Run: func(a *App) {
 				CollapseAll(a.expandedState)
 				a.rebuildAndRenderGroups()
+			},
+		},
+		{
+			ID:       "clear_selection",
+			Title:    "Clear selection",
+			Keywords: []string{"clear", "selection", "deselect", "unselect"},
+			Run: func(a *App) {
+				a.ClearSelectedIssues()
+				a.renderAllIssueGroups()
+				a.updateStatusBar()
 			},
 		},
 		{
