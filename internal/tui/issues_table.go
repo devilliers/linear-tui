@@ -186,6 +186,31 @@ func (a *App) setupIssuesTableNavigation(table *tview.Table, groupIdx int) {
 		}
 
 		switch event.Key() {
+		case tcell.KeyCtrlJ:
+			// Ctrl+J: jump to next group
+			next := a.nextNonEmptyGroup(section)
+			if next > section {
+				a.activeGroupIndex = next
+				a.issueGroups[next].table.Select(1, 0)
+				if issue := a.getIssueFromRowForSection(1, next); issue != nil {
+					a.onIssueSelected(*issue)
+				}
+				a.updateFocus()
+			}
+			return nil
+		case tcell.KeyCtrlK:
+			// Ctrl+K: jump to previous group
+			prev := a.prevNonEmptyGroup(section)
+			if prev < section {
+				a.activeGroupIndex = prev
+				lastRow := len(a.issueGroups[prev].rows)
+				a.issueGroups[prev].table.Select(lastRow, 0)
+				if issue := a.getIssueFromRowForSection(lastRow, prev); issue != nil {
+					a.onIssueSelected(*issue)
+				}
+				a.updateFocus()
+			}
+			return nil
 		case tcell.KeyRune:
 			switch event.Rune() {
 			case 'j':
@@ -196,17 +221,6 @@ func (a *App) setupIssuesTableNavigation(table *tview.Table, groupIdx int) {
 						a.onIssueSelected(*issue)
 						a.activeGroupIndex = section
 					}
-				} else {
-					// At bottom - try to move to next group
-					next := a.nextNonEmptyGroup(section)
-					if next > section {
-						a.activeGroupIndex = next
-						a.issueGroups[next].table.Select(1, 0)
-						if issue := a.getIssueFromRowForSection(1, next); issue != nil {
-							a.onIssueSelected(*issue)
-						}
-						a.updateFocus()
-					}
 				}
 				return nil
 			case 'k':
@@ -216,18 +230,6 @@ func (a *App) setupIssuesTableNavigation(table *tview.Table, groupIdx int) {
 					if issue := a.getIssueFromRowForSection(row-1, section); issue != nil {
 						a.onIssueSelected(*issue)
 						a.activeGroupIndex = section
-					}
-				} else {
-					// At top - try to move to previous group
-					prev := a.prevNonEmptyGroup(section)
-					if prev < section {
-						a.activeGroupIndex = prev
-						lastRow := len(a.issueGroups[prev].rows)
-						a.issueGroups[prev].table.Select(lastRow, 0)
-						if issue := a.getIssueFromRowForSection(lastRow, prev); issue != nil {
-							a.onIssueSelected(*issue)
-						}
-						a.updateFocus()
 					}
 				}
 				return nil
@@ -315,16 +317,6 @@ func (a *App) setupIssuesTableNavigation(table *tview.Table, groupIdx int) {
 					a.onIssueSelected(*issue)
 					a.activeGroupIndex = section
 				}
-			} else {
-				next := a.nextNonEmptyGroup(section)
-				if next > section {
-					a.activeGroupIndex = next
-					a.issueGroups[next].table.Select(1, 0)
-					if issue := a.getIssueFromRowForSection(1, next); issue != nil {
-						a.onIssueSelected(*issue)
-					}
-					a.updateFocus()
-				}
 			}
 			return nil
 		case tcell.KeyUp:
@@ -334,17 +326,6 @@ func (a *App) setupIssuesTableNavigation(table *tview.Table, groupIdx int) {
 				if issue := a.getIssueFromRowForSection(row-1, section); issue != nil {
 					a.onIssueSelected(*issue)
 					a.activeGroupIndex = section
-				}
-			} else {
-				prev := a.prevNonEmptyGroup(section)
-				if prev < section {
-					a.activeGroupIndex = prev
-					lastRow := len(a.issueGroups[prev].rows)
-					a.issueGroups[prev].table.Select(lastRow, 0)
-					if issue := a.getIssueFromRowForSection(lastRow, prev); issue != nil {
-						a.onIssueSelected(*issue)
-					}
-					a.updateFocus()
 				}
 			}
 			return nil

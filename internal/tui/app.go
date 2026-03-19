@@ -1054,13 +1054,17 @@ func (a *App) bindGlobalKeys() {
 			a.updateFocus()
 			return nil
 		case tcell.KeyCtrlK:
-			// Ctrl+K: cycle panes backward
-			a.cyclePanesBackward()
-			return nil
+			// Ctrl+K: cycle panes backward (unless in issues pane, handled by table)
+			if a.focusedPane != FocusIssues {
+				a.cyclePanesBackward()
+				return nil
+			}
 		case tcell.KeyCtrlJ:
-			// Ctrl+J: cycle panes forward
-			a.cyclePanesForward()
-			return nil
+			// Ctrl+J: cycle panes forward (unless in issues pane, handled by table)
+			if a.focusedPane != FocusIssues {
+				a.cyclePanesForward()
+				return nil
+			}
 		case tcell.KeyRune:
 			switch event.Rune() {
 			case 'q':
