@@ -288,6 +288,7 @@ func NewApp(api *linearapi.Client, cfg config.Config, templates []config.AgentPr
 		focusedPane:          FocusNavigation,
 		sortField:            SortByUpdatedAt,
 		groupBy:              GroupByNone,
+		hideCompleted:        cfg.HideCompleted,
 		expandedState:        make(map[string]bool),
 		idToIssue:            make(map[string]*linearapi.Issue),
 		agentPromptTemplates: templates,
@@ -1022,6 +1023,35 @@ func (a *App) bindGlobalKeys() {
 				}
 			}
 			return nil
+		case tcell.KeyCtrlH:
+			// Ctrl+H: move focus left
+			switch a.focusedPane {
+			case FocusIssues:
+				a.focusedPane = FocusNavigation
+			case FocusDetails:
+				a.focusedPane = FocusIssues
+			}
+			a.updateFocus()
+			return nil
+		case tcell.KeyCtrlL:
+			// Ctrl+L: move focus right
+			switch a.focusedPane {
+			case FocusNavigation:
+				a.focusedPane = FocusIssues
+			case FocusIssues:
+				a.focusedPane = FocusDetails
+				a.focusedDetailsView = false
+			}
+			a.updateFocus()
+			return nil
+		case tcell.KeyCtrlK:
+			// Ctrl+K: cycle panes backward
+			a.cyclePanesBackward()
+			return nil
+		case tcell.KeyCtrlJ:
+			// Ctrl+J: cycle panes forward
+			a.cyclePanesForward()
+			return nil
 		case tcell.KeyRune:
 			switch event.Rune() {
 			case 'q':
@@ -1057,12 +1087,6 @@ func (a *App) handleNavigationKey(event *tcell.EventKey) *tcell.EventKey {
 		a.focusedPane = FocusIssues
 		a.updateFocus()
 		return nil
-	case tcell.KeyRune:
-		if event.Rune() == 'l' {
-			a.focusedPane = FocusIssues
-			a.updateFocus()
-			return nil
-		}
 	}
 	return event
 }
@@ -1081,18 +1105,6 @@ func (a *App) handleIssuesKey(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyRune:
 		r := event.Rune()
-		// Handle vim-style navigation first
-		switch r {
-		case 'h':
-			a.focusedPane = FocusNavigation
-			a.updateFocus()
-			return nil
-		case 'l':
-			a.focusedPane = FocusDetails
-			a.focusedDetailsView = false // Start with description
-			a.updateFocus()
-			return nil
-		}
 		// Handle command shortcuts (plain letters) - skip navigation keys
 		if r != 'j' && r != 'k' { // j/k are handled by table for up/down
 			for _, cmd := range a.paletteCtrl.commands {
@@ -1113,12 +1125,6 @@ func (a *App) handleDetailsKey(event *tcell.EventKey) *tcell.EventKey {
 		a.focusedPane = FocusIssues
 		a.updateFocus()
 		return nil
-	case tcell.KeyRune:
-		if event.Rune() == 'h' {
-			a.focusedPane = FocusIssues
-			a.updateFocus()
-			return nil
-		}
 	}
 	return event
 }

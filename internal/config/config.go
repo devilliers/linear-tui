@@ -94,6 +94,9 @@ type Config struct {
 
 	// DefaultTeam is the team name to auto-select on startup.
 	DefaultTeam string
+
+	// HideCompleted hides completed/canceled issues on startup.
+	HideCompleted bool
 }
 
 // LoadFromEnv loads configuration from environment variables.

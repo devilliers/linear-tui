@@ -26,6 +26,7 @@ type SettingsFile struct {
 	AgentModel     *string `json:"agent_model"`
 	AgentWorkspace *string `json:"agent_workspace"`
 	DefaultTeam    *string `json:"default_team"`
+	HideCompleted  *bool   `json:"hide_completed"`
 }
 
 // Settings contains concrete settings values for UI and persistence.
@@ -44,6 +45,7 @@ type Settings struct {
 	AgentModel     string `json:"agent_model"`
 	AgentWorkspace string `json:"agent_workspace"`
 	DefaultTeam    string `json:"default_team"`
+	HideCompleted  bool   `json:"hide_completed"`
 }
 
 // DefaultSettings returns the default settings for the config file and UI.
@@ -82,6 +84,7 @@ func SettingsFromConfig(cfg Config) Settings {
 		AgentModel:     cfg.AgentModel,
 		AgentWorkspace: cfg.AgentWorkspace,
 		DefaultTeam:    cfg.DefaultTeam,
+		HideCompleted:  cfg.HideCompleted,
 	}
 }
 
@@ -154,6 +157,7 @@ func ConfigFromSettings(apiKey string, settings Settings) (Config, error) {
 		AgentModel:     settings.AgentModel,
 		AgentWorkspace: settings.AgentWorkspace,
 		DefaultTeam:    settings.DefaultTeam,
+		HideCompleted:  settings.HideCompleted,
 	}, nil
 }
 
@@ -245,6 +249,9 @@ func LoadSettings(path string) (Settings, error) {
 	}
 	if file.DefaultTeam != nil {
 		settings.DefaultTeam = *file.DefaultTeam
+	}
+	if file.HideCompleted != nil {
+		settings.HideCompleted = *file.HideCompleted
 	}
 
 	return settings, nil
