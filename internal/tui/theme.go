@@ -24,6 +24,7 @@ type Theme struct {
 	// Status Colors
 	StatusTodo       tcell.Color
 	StatusInProgress tcell.Color
+	StatusBlocked    tcell.Color
 	StatusDone       tcell.Color
 	StatusCanceled   tcell.Color
 }
@@ -44,6 +45,7 @@ var LinearTheme = Theme{
 
 	StatusTodo:       tcell.NewRGBColor(140, 140, 140), // Gray
 	StatusInProgress: tcell.NewRGBColor(242, 201, 76),  // Yellow
+	StatusBlocked:    tcell.NewRGBColor(255, 80, 80),   // Red
 	StatusDone:       tcell.NewRGBColor(94, 106, 210),  // Purple/Blue (Linear uses purple for done often, or green)
 	StatusCanceled:   tcell.NewRGBColor(255, 80, 80),   // Red
 }
@@ -64,6 +66,7 @@ var HighContrastTheme = Theme{
 
 	StatusTodo:       tcell.NewRGBColor(255, 255, 255), // White
 	StatusInProgress: tcell.NewRGBColor(255, 255, 0),   // Yellow
+	StatusBlocked:    tcell.NewRGBColor(255, 0, 0),     // Red
 	StatusDone:       tcell.NewRGBColor(0, 255, 0),     // Green
 	StatusCanceled:   tcell.NewRGBColor(255, 0, 0),     // Red
 }
@@ -84,6 +87,7 @@ var ColorBlindTheme = Theme{
 
 	StatusTodo:       tcell.NewRGBColor(153, 153, 153), // Gray
 	StatusInProgress: tcell.NewRGBColor(86, 180, 233),  // #56B4E9
+	StatusBlocked:    tcell.NewRGBColor(213, 94, 0),    // #D55E00
 	StatusDone:       tcell.NewRGBColor(0, 158, 115),   // #009E73
 	StatusCanceled:   tcell.NewRGBColor(213, 94, 0),    // #D55E00
 }

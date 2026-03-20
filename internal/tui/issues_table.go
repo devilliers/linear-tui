@@ -473,6 +473,12 @@ func renderIssuesTableModel(table *tview.Table, rows []IssueRow, idToIssue map[s
 		case strings.Contains(lowerState, "progress"):
 			stateColor = theme.StatusInProgress
 			stateIcon = Icons.InProgress
+		case strings.Contains(lowerState, "blocked"):
+			stateColor = theme.StatusBlocked
+			stateIcon = Icons.InProgress
+		case strings.Contains(lowerState, "review"):
+			stateColor = theme.StatusDone
+			stateIcon = Icons.InProgress
 		case strings.Contains(lowerState, "cancel"):
 			stateColor = theme.StatusCanceled
 			stateIcon = Icons.Done
