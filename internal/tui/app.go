@@ -179,6 +179,7 @@ type App struct {
 	pickerModal            *PickerModal
 	createIssueModal       *CreateIssueModal
 	createCommentModal     *CreateCommentModal
+	blockedReasonModal     *BlockedReasonModal
 	editTitleModal         *EditTitleModal
 	editLabelsModal        *EditLabelsModal
 	textInputModal         *TextInputModal
@@ -475,6 +476,7 @@ func (a *App) rebuildModals() {
 	a.pickerModal = NewPickerModal(a)
 	a.createIssueModal = NewCreateIssueModal(a)
 	a.createCommentModal = NewCreateCommentModal(a)
+	a.blockedReasonModal = NewBlockedReasonModal(a)
 	a.editTitleModal = NewEditTitleModal(a)
 	a.editLabelsModal = NewEditLabelsModal(a)
 	a.textInputModal = NewTextInputModal(a)
@@ -882,6 +884,7 @@ func (a *App) buildLayout() {
 	a.pickerModal = NewPickerModal(a)
 	a.createIssueModal = NewCreateIssueModal(a)
 	a.createCommentModal = NewCreateCommentModal(a)
+	a.blockedReasonModal = NewBlockedReasonModal(a)
 	a.editTitleModal = NewEditTitleModal(a)
 	a.editLabelsModal = NewEditLabelsModal(a)
 	a.textInputModal = NewTextInputModal(a)
@@ -921,6 +924,11 @@ func (a *App) bindGlobalKeys() {
 		// Check if create comment modal is visible and handle its keys
 		if a.pages.HasPage("create_comment") && a.createCommentModal != nil {
 			return a.createCommentModal.HandleKey(event)
+		}
+
+		// Check if blocked reason modal is visible and handle its keys
+		if a.pages.HasPage("blocked_reason") && a.blockedReasonModal != nil {
+			return a.blockedReasonModal.HandleKey(event)
 		}
 
 		// Check if edit title modal is visible and handle its keys

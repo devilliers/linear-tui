@@ -613,7 +613,8 @@ func DefaultCommands(app *App) []Command {
 				if len(issues) == 0 {
 					return
 				}
-				a.ShowStatusPicker(func(stateID string) {
+
+				applyStatusChange := func(stateID string, blockedReason string) {
 					go func() {
 						ctx := context.Background()
 						var firstErr error
@@ -630,6 +631,20 @@ func DefaultCommands(app *App) []Command {
 							} else {
 								logger.Info("tui.commands: changed status issue=%s", issue.Identifier)
 							}
+							if blockedReason != "" {
+								_, commentErr := a.GetAPI().CreateComment(ctx, linearapi.CreateCommentInput{
+									IssueID: issue.ID,
+									Body:    blockedReason,
+								})
+								if commentErr != nil {
+									logger.ErrorWithErr(commentErr, "tui.commands: failed to add blocked reason comment issue=%s", issue.Identifier)
+									if firstErr == nil {
+										firstErr = commentErr
+									}
+								} else {
+									logger.Info("tui.commands: added blocked reason comment issue=%s", issue.Identifier)
+								}
+							}
 						}
 						a.QueueUpdateDraw(func() {
 							if firstErr != nil {
@@ -639,6 +654,25 @@ func DefaultCommands(app *App) []Command {
 							go a.refreshIssues(issues[0].ID)
 						})
 					}()
+				}
+
+				a.ShowStatusPicker(func(stateID string) {
+					// Check if the selected state is "Blocked"
+					isBlocked := false
+					for _, state := range a.workflowStates {
+						if state.ID == stateID && strings.EqualFold(state.Name, "Blocked") {
+							isBlocked = true
+							break
+						}
+					}
+
+					if isBlocked {
+						a.blockedReasonModal.Show(func(reason string) {
+							applyStatusChange(stateID, reason)
+						})
+					} else {
+						applyStatusChange(stateID, "")
+					}
 				})
 			},
 		},
