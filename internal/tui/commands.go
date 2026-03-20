@@ -536,27 +536,34 @@ func DefaultCommands(app *App) []Command {
 			Keywords:     []string{"unassign", "remove", "clear assignee"},
 			ShortcutRune: 'u',
 			Run: func(a *App) {
-				issue := a.GetSelectedIssue()
-				if issue == nil {
-					a.flashStatus("No issue selected")
+				issues := a.GetSelectedOrMultiIssues()
+				if len(issues) == 0 {
 					return
 				}
 				emptyAssignee := ""
 				go func() {
 					ctx := context.Background()
-					_, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
-						ID:         issue.ID,
-						AssigneeID: &emptyAssignee,
-					})
-					a.QueueUpdateDraw(func() {
+					var firstErr error
+					for _, issue := range issues {
+						_, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
+							ID:         issue.ID,
+							AssigneeID: &emptyAssignee,
+						})
 						if err != nil {
 							logger.ErrorWithErr(err, "tui.commands: failed to unassign issue issue=%s", issue.Identifier)
-							a.updateStatusBarWithError(err)
-							return
+							if firstErr == nil {
+								firstErr = err
+							}
+						} else {
+							logger.Info("tui.commands: unassigned issue issue=%s", issue.Identifier)
 						}
-						logger.Info("tui.commands: unassigned issue issue=%s", issue.Identifier)
-						a.flashStatus(fmt.Sprintf("Unassigned %s", issue.Identifier))
-						go a.refreshIssues(issue.ID)
+					}
+					a.QueueUpdateDraw(func() {
+						if firstErr != nil {
+							a.updateStatusBarWithError(firstErr)
+						}
+						a.ClearSelectedIssues()
+						go a.refreshIssues(issues[0].ID)
 					})
 				}()
 			},
