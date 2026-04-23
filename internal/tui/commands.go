@@ -224,7 +224,7 @@ func DefaultCommands(app *App) []Command {
 			ShortcutRune: 'r',
 			Run: func(a *App) {
 				a.flashStatus("Refreshing issues...")
-				go a.refreshIssues()
+				go a.forceRefreshIssues()
 			},
 		},
 		{
@@ -513,7 +513,7 @@ func DefaultCommands(app *App) []Command {
 				}
 				go func() {
 					ctx := context.Background()
-					_, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
+					updated, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
 						ID:         issue.ID,
 						AssigneeID: &user.ID,
 					})
@@ -525,7 +525,7 @@ func DefaultCommands(app *App) []Command {
 						}
 						logger.Info("tui.commands: assigned issue issue=%s user=%s", issue.Identifier, user.DisplayName)
 						a.flashStatus(fmt.Sprintf("Assigned %s to %s", issue.Identifier, user.DisplayName))
-						go a.refreshIssues(issue.ID)
+						a.patchCachedIssue(updated)
 					})
 				}()
 			},
@@ -544,8 +544,9 @@ func DefaultCommands(app *App) []Command {
 				go func() {
 					ctx := context.Background()
 					var firstErr error
+					var updatedIssues []linearapi.Issue
 					for _, issue := range issues {
-						_, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
+						updated, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
 							ID:         issue.ID,
 							AssigneeID: &emptyAssignee,
 						})
@@ -556,6 +557,7 @@ func DefaultCommands(app *App) []Command {
 							}
 						} else {
 							logger.Info("tui.commands: unassigned issue issue=%s", issue.Identifier)
+							updatedIssues = append(updatedIssues, updated)
 						}
 					}
 					a.QueueUpdateDraw(func() {
@@ -563,7 +565,9 @@ func DefaultCommands(app *App) []Command {
 							a.updateStatusBarWithError(firstErr)
 						}
 						a.ClearSelectedIssues()
-						go a.refreshIssues(issues[0].ID)
+						for _, updated := range updatedIssues {
+							a.patchCachedIssue(updated)
+						}
 					})
 				}()
 			},
@@ -584,9 +588,10 @@ func DefaultCommands(app *App) []Command {
 					fmt.Sprintf("Archive %s - %s?", issue.Identifier, issue.Title),
 					"Archive",
 					func() {
+						issueID := issue.ID
 						go func() {
 							ctx := context.Background()
-							err := a.GetAPI().ArchiveIssue(ctx, issue.ID)
+							err := a.GetAPI().ArchiveIssue(ctx, issueID)
 							a.QueueUpdateDraw(func() {
 								if err != nil {
 									logger.ErrorWithErr(err, "tui.commands: failed to archive issue issue=%s", issue.Identifier)
@@ -595,8 +600,7 @@ func DefaultCommands(app *App) []Command {
 								}
 								logger.Info("tui.commands: archived issue issue=%s", issue.Identifier)
 								a.flashStatus(fmt.Sprintf("Archived %s", issue.Identifier))
-								// After archiving, the issue won't be in the list, so just refresh without ID
-								go a.refreshIssues()
+								a.removeCachedIssue(issueID)
 							})
 						}()
 					},
@@ -618,8 +622,9 @@ func DefaultCommands(app *App) []Command {
 					go func() {
 						ctx := context.Background()
 						var firstErr error
+						var updatedIssues []linearapi.Issue
 						for _, issue := range issues {
-							_, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
+							updated, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
 								ID:      issue.ID,
 								StateID: &stateID,
 							})
@@ -630,6 +635,7 @@ func DefaultCommands(app *App) []Command {
 								}
 							} else {
 								logger.Info("tui.commands: changed status issue=%s", issue.Identifier)
+								updatedIssues = append(updatedIssues, updated)
 							}
 							if blockedReason != "" {
 								_, commentErr := a.GetAPI().CreateComment(ctx, linearapi.CreateCommentInput{
@@ -651,7 +657,9 @@ func DefaultCommands(app *App) []Command {
 								a.updateStatusBarWithError(firstErr)
 							}
 							a.ClearSelectedIssues()
-							go a.refreshIssues(issues[0].ID)
+							for _, updated := range updatedIssues {
+								a.patchCachedIssue(updated)
+							}
 						})
 					}()
 				}
@@ -740,8 +748,9 @@ func DefaultCommands(app *App) []Command {
 					go func() {
 						ctx := context.Background()
 						var firstErr error
+						var updatedIssues []linearapi.Issue
 						for _, issue := range issues {
-							_, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
+							updated, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
 								ID:         issue.ID,
 								AssigneeID: &userID,
 							})
@@ -752,6 +761,7 @@ func DefaultCommands(app *App) []Command {
 								}
 							} else {
 								logger.Info("tui.commands: assigned issue to user issue=%s", issue.Identifier)
+								updatedIssues = append(updatedIssues, updated)
 							}
 						}
 						a.QueueUpdateDraw(func() {
@@ -759,7 +769,9 @@ func DefaultCommands(app *App) []Command {
 								a.updateStatusBarWithError(firstErr)
 							}
 							a.ClearSelectedIssues()
-							go a.refreshIssues(issues[0].ID)
+							for _, updated := range updatedIssues {
+								a.patchCachedIssue(updated)
+							}
 						})
 					}()
 				})
@@ -959,7 +971,7 @@ func DefaultCommands(app *App) []Command {
 				a.ShowParentIssuePicker(func(parentID string) {
 					go func() {
 						ctx := context.Background()
-						_, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
+						updated, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
 							ID:       issue.ID,
 							ParentID: &parentID,
 						})
@@ -971,7 +983,7 @@ func DefaultCommands(app *App) []Command {
 							}
 							logger.Info("tui.commands: set parent issue=%s", issue.Identifier)
 							a.flashStatus(fmt.Sprintf("Set parent for %s", issue.Identifier))
-							go a.refreshIssues(issue.ID)
+							a.patchCachedIssue(updated)
 						})
 					}()
 				})
@@ -1000,7 +1012,7 @@ func DefaultCommands(app *App) []Command {
 						emptyParent := ""
 						go func() {
 							ctx := context.Background()
-							_, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
+							updated, err := a.GetAPI().UpdateIssue(ctx, linearapi.UpdateIssueInput{
 								ID:       issue.ID,
 								ParentID: &emptyParent,
 							})
@@ -1012,7 +1024,7 @@ func DefaultCommands(app *App) []Command {
 								}
 								logger.Info("tui.commands: removed parent issue=%s", issue.Identifier)
 								a.flashStatus(fmt.Sprintf("Removed parent from %s", issue.Identifier))
-								go a.refreshIssues(issue.ID)
+								a.patchCachedIssue(updated)
 							})
 						}()
 					},

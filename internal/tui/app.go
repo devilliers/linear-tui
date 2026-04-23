@@ -165,8 +165,8 @@ type App struct {
 	pages                  *tview.Pages
 	mainLayout             *tview.Flex
 	navigationTree         *tview.TreeView
-	issuesTable            *tview.Table // Legacy - kept for backward compatibility during migration
-	issuesColumn           *tview.Flex  // Vertical flex containing group tables
+	issuesTable            *tview.Table    // Legacy - kept for backward compatibility during migration
+	issuesColumn           *tview.Flex     // Vertical flex containing group tables
 	detailsView            *tview.Flex     // Flex container for details (description + comments)
 	detailsDescriptionView *tview.TextView // Scrollable description/metadata view
 	detailsCommentsView    *tview.TextView // Scrollable comments view
@@ -205,9 +205,9 @@ type App struct {
 	issueRows []IssueRow                  // Flattened rows for table rendering
 	idToIssue map[string]*linearapi.Issue // Quick lookup by issue ID
 	// Dynamic issue groups (replaces hardcoded my/other split)
-	issueGroups   []issueGroupState // One entry per visible group
-	expandedState  map[string]bool // Expanded state for parent issues (shared across groups)
-	selectedIssues map[string]bool // Multi-selection: set of issue IDs selected with space
+	issueGroups    []issueGroupState // One entry per visible group
+	expandedState  map[string]bool   // Expanded state for parent issues (shared across groups)
+	selectedIssues map[string]bool   // Multi-selection: set of issue IDs selected with space
 
 	// Filter/sort/group state
 	searchQuery   string
@@ -1484,6 +1484,9 @@ func (a *App) runQueuedIssuesRefresh() {
 	a.pendingRefresh = false
 	a.pendingRefreshIssueID = ""
 	a.pendingRefreshAllowFocusChange = true
+	// The queued refresh was triggered while a load was in progress, meaning
+	// the data changed. Invalidate cache so we always fetch fresh from the API.
+	a.cache.InvalidateIssues()
 	if issueID != "" {
 		go a.refreshIssuesWithFocusChange(allowFocusChange, issueID)
 		return
@@ -1503,18 +1506,120 @@ func (a *App) refreshIssues(issueID ...string) {
 	a.refreshIssuesWithFocusChange(true, issueID...)
 }
 
+// forceRefreshIssues invalidates the issue cache and triggers a full refresh.
+// Use this when the query context changes (navigation, search, sort) or for
+// an explicit manual refresh. Regular post-mutation refreshes should use
+// patchCachedIssue / removeCachedIssue instead.
+func (a *App) forceRefreshIssues(issueID ...string) {
+	a.cache.InvalidateIssues()
+	a.refreshIssuesWithFocusChange(true, issueID...)
+}
+
+// forceRefreshIssuesWithFocusChange is like forceRefreshIssues but allows
+// controlling whether focus is shifted to the issues pane after load.
+func (a *App) forceRefreshIssuesWithFocusChange(allowFocusChange bool, issueID ...string) {
+	a.cache.InvalidateIssues()
+	a.refreshIssuesWithFocusChange(allowFocusChange, issueID...)
+}
+
+// issueCacheKey returns a stable string key for the current query context.
+// Two refreshes with the same key will return the same cached issue list.
+func (a *App) issueCacheKey() string {
+	var navKey string
+	if a.selectedNavigation != nil {
+		navKey = fmt.Sprintf("%s|%s|%s", a.selectedNavigation.TeamID, a.selectedNavigation.ID, a.selectedNavigation.StateID)
+	}
+	return fmt.Sprintf("nav=%s|search=%s|sort=%s", navKey, a.searchQuery, string(a.sortField))
+}
+
+// patchCachedIssue applies a local update to a single issue in the cache and
+// re-renders the UI without an API round-trip. Call this after a successful
+// mutation to keep the displayed data consistent.
+func (a *App) patchCachedIssue(updated linearapi.Issue, targetIssueID ...string) {
+	// Update the in-memory issues slice
+	a.issuesMu.Lock()
+	for i, issue := range a.issues {
+		if issue.ID == updated.ID {
+			a.issues[i] = updated
+			break
+		}
+	}
+	a.issuesMu.Unlock()
+
+	// Persist into the cache so future reads are also correct
+	a.cache.PatchIssue(updated)
+
+	// Re-render from the updated in-memory slice (no API call)
+	tid := updated.ID
+	if len(targetIssueID) > 0 && targetIssueID[0] != "" {
+		tid = targetIssueID[0]
+	}
+	selectedIssue := a.rebuildIssuesTables(tid)
+	if selectedIssue != nil {
+		a.issuesMu.Lock()
+		a.selectedIssue = selectedIssue
+		a.issuesMu.Unlock()
+		a.updateDetailsView()
+	}
+	a.updateStatusBar()
+}
+
+// removeCachedIssue removes an issue from the in-memory slice and cache
+// (used after archive), then re-renders without an API round-trip.
+func (a *App) removeCachedIssue(issueID string) {
+	a.issuesMu.Lock()
+	filtered := a.issues[:0]
+	for _, issue := range a.issues {
+		if issue.ID != issueID {
+			filtered = append(filtered, issue)
+		}
+	}
+	a.issues = filtered
+	a.issuesMu.Unlock()
+
+	a.cache.RemoveIssue(issueID)
+
+	selectedIssue := a.rebuildIssuesTables("")
+	a.issuesMu.Lock()
+	if selectedIssue != nil {
+		a.selectedIssue = selectedIssue
+	} else {
+		a.selectedIssue = nil
+	}
+	a.issuesMu.Unlock()
+	a.updateDetailsView()
+	a.updateStatusBar()
+}
+
 // refreshIssuesWithFocusChange fetches issues and optionally shifts focus to the issues pane.
+// If the issue list for the current query context is already in cache it renders
+// immediately from cache without hitting the API.
 func (a *App) refreshIssuesWithFocusChange(allowFocusChange bool, issueID ...string) {
 	if a.isLoading {
 		a.queueIssuesRefresh(allowFocusChange, issueID...)
 		return
 	}
-	a.isLoading = true
 
 	targetID := ""
 	if len(issueID) > 0 {
 		targetID = issueID[0]
 	}
+
+	// --- Cache hit: serve from cache without an API round-trip ---
+	cacheKey := a.issueCacheKey()
+	if cached, ok := a.cache.GetIssues(cacheKey); ok {
+		logger.Debug("tui.app: serving issues from cache key=%s target_issue_id=%s", cacheKey, targetID)
+		a.updateIssuesData(cached, targetID)
+		if allowFocusChange {
+			a.focusedPane = FocusIssues
+			a.updateFocus()
+		}
+		return
+	}
+
+	// --- Cache miss: fetch from the API ---
+	a.isLoading = true
+
 	logger.Debug("tui.app: starting issues refresh target_issue_id=%s", targetID)
 	generation := a.refreshGeneration.Add(1)
 	var targetIssueID string
@@ -1626,6 +1731,12 @@ func (a *App) refreshIssuesWithFocusChange(allowFocusChange bool, issueID ...str
 		a.QueueUpdateDraw(func() {
 			a.isLoading = false
 			logger.Debug("tui.app: refresh completed pages=%d total_fetched=%d", pageCount, fetchedCount)
+			// Populate cache with the fully-fetched list
+			a.issuesMu.RLock()
+			issuesCopy := make([]linearapi.Issue, len(a.issues))
+			copy(issuesCopy, a.issues)
+			a.issuesMu.RUnlock()
+			a.cache.SetIssues(cacheKey, issuesCopy, a.config.CacheTTL)
 			a.updateStatusBar()
 			a.notifyRefreshCompleted()
 			a.runQueuedIssuesRefresh()
@@ -2120,8 +2231,9 @@ func (a *App) onNavigationSelected(node *NavigationNode) {
 	}
 
 	// Refresh issues for the new selection - run in goroutine to avoid blocking
-	// the tview callback (QueueUpdateDraw deadlocks if called from within a callback)
-	go a.refreshIssuesWithFocusChange(false)
+	// the tview callback (QueueUpdateDraw deadlocks if called from within a callback).
+	// Force-refresh because the navigation context changed.
+	go a.forceRefreshIssuesWithFocusChange(false)
 }
 
 // setSearchQuery sets the search query and refreshes issues.
@@ -2139,16 +2251,18 @@ func (a *App) setSearchQueryWithFocusChange(query string, allowFocusChange bool)
 		a.focusedPane = FocusIssues
 	}
 	a.updateFocus()
-	// Run in goroutine to avoid deadlock when called from tview callbacks
-	go a.refreshIssuesWithFocusChange(allowFocusChange)
+	// Run in goroutine to avoid deadlock when called from tview callbacks.
+	// Force-refresh because the search context changed.
+	go a.forceRefreshIssuesWithFocusChange(allowFocusChange)
 }
 
 // setSortField sets the sort field and refreshes issues.
 func (a *App) setSortField(field SortField) {
 	logger.Debug("tui.app: setting sort field field=%s", field)
 	a.sortField = field
-	// Run in goroutine to avoid deadlock when called from tview callbacks
-	go a.refreshIssues()
+	// Run in goroutine to avoid deadlock when called from tview callbacks.
+	// Force-refresh because the sort context changed.
+	go a.forceRefreshIssues()
 }
 
 // updateStatusBar updates the status bar with current information.
@@ -2703,7 +2817,7 @@ func (a *App) showCreateIssueModalWithParent(parentID string, parentRef *lineara
 					logger.Info("tui.app: created issue issue=%s title=%s", issue.Identifier, title)
 					a.flashStatus(fmt.Sprintf("Created issue %s", issue.Identifier))
 				}
-				go a.refreshIssues(issue.ID)
+				go a.forceRefreshIssues(issue.ID)
 			})
 		}()
 	})
@@ -2736,7 +2850,7 @@ func (a *App) ShowEditTitleModal() {
 	a.editTitleModal.Show(issue.ID, issue.Title, func(issueID, title string) {
 		go func() {
 			ctx := context.Background()
-			_, err := a.api.UpdateIssue(ctx, linearapi.UpdateIssueInput{
+			updated, err := a.api.UpdateIssue(ctx, linearapi.UpdateIssueInput{
 				ID:    issueID,
 				Title: &title,
 			})
@@ -2748,7 +2862,7 @@ func (a *App) ShowEditTitleModal() {
 				}
 				logger.Info("tui.app: updated issue title issue=%s", issue.Identifier)
 				a.flashStatus(fmt.Sprintf("Updated title for %s", issue.Identifier))
-				go a.refreshIssues(issueID)
+				a.patchCachedIssue(updated)
 			})
 		}()
 	})
@@ -2795,7 +2909,7 @@ func (a *App) ShowEditLabelsModal() {
 			a.editLabelsModal.Show(issue.ID, currentLabelIDs, availableLabels, func(issueID string, labelIDs []string) {
 				go func() {
 					ctx := context.Background()
-					_, err := a.api.UpdateIssue(ctx, linearapi.UpdateIssueInput{
+					updated, err := a.api.UpdateIssue(ctx, linearapi.UpdateIssueInput{
 						ID:       issueID,
 						LabelIDs: &labelIDs,
 					})
@@ -2807,7 +2921,7 @@ func (a *App) ShowEditLabelsModal() {
 						}
 						logger.Info("tui.app: updated labels issue=%s", issue.Identifier)
 						a.flashStatus(fmt.Sprintf("Updated labels for %s", issue.Identifier))
-						go a.refreshIssues(issueID)
+						a.patchCachedIssue(updated)
 					})
 				}()
 			})

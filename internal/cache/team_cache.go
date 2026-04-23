@@ -43,6 +43,10 @@ type TeamCache struct {
 	// Project-scoped caches
 	projectMilestones       map[string][]linearapi.ProjectMilestone
 	projectMilestonesExpiry map[string]time.Time
+
+	// Issue list cache keyed by a context string (navigation+search+sort)
+	issues       map[string][]linearapi.Issue
+	issuesExpiry map[string]time.Time
 }
 
 // NewTeamCache creates a new team cache with the given client and TTL.
@@ -62,6 +66,8 @@ func NewTeamCache(client *linearapi.Client, ttl time.Duration) *TeamCache {
 		labelsExpiry:            make(map[string]time.Time),
 		projectMilestones:       make(map[string][]linearapi.ProjectMilestone),
 		projectMilestonesExpiry: make(map[string]time.Time),
+		issues:                  make(map[string][]linearapi.Issue),
+		issuesExpiry:            make(map[string]time.Time),
 	}
 }
 
@@ -258,6 +264,76 @@ func (c *TeamCache) InvalidateAll() {
 	c.labelsExpiry = make(map[string]time.Time)
 	c.projectMilestones = make(map[string][]linearapi.ProjectMilestone)
 	c.projectMilestonesExpiry = make(map[string]time.Time)
+	c.issues = make(map[string][]linearapi.Issue)
+	c.issuesExpiry = make(map[string]time.Time)
+}
+
+// GetIssues returns cached issues for the given context key if still valid.
+// Returns nil, false if the cache is empty or expired.
+func (c *TeamCache) GetIssues(key string) ([]linearapi.Issue, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if exp, ok := c.issuesExpiry[key]; ok && time.Now().Before(exp) {
+		issues := c.issues[key]
+		return issues, true
+	}
+	return nil, false
+}
+
+// SetIssues stores a fetched issues list under the given context key.
+func (c *TeamCache) SetIssues(key string, issues []linearapi.Issue, ttl time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Make a copy so the caller can't mutate what we stored.
+	cp := make([]linearapi.Issue, len(issues))
+	copy(cp, issues)
+	c.issues[key] = cp
+	c.issuesExpiry[key] = time.Now().Add(ttl)
+	logger.Debug("cache.team: cached issues key=%s count=%d ttl=%s", key, len(cp), ttl)
+}
+
+// PatchIssue updates a single issue in every cached issues list that contains it.
+// This is used after a mutation so that the UI can re-render from cache without
+// hitting the API again.
+func (c *TeamCache) PatchIssue(updated linearapi.Issue) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, list := range c.issues {
+		for i, issue := range list {
+			if issue.ID == updated.ID {
+				c.issues[key][i] = updated
+				logger.Debug("cache.team: patched issue key=%s issue_id=%s", key, updated.ID)
+				break
+			}
+		}
+	}
+}
+
+// RemoveIssue removes a single issue from every cached issues list.
+// This is used after an archive so the issue disappears from the cached view.
+func (c *TeamCache) RemoveIssue(issueID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, list := range c.issues {
+		for i, issue := range list {
+			if issue.ID == issueID {
+				c.issues[key] = append(list[:i], list[i+1:]...)
+				logger.Debug("cache.team: removed issue key=%s issue_id=%s", key, issueID)
+				break
+			}
+		}
+	}
+}
+
+// InvalidateIssues clears all cached issue lists, forcing the next refresh to
+// fetch from the API. Call this when the query context changes (navigation,
+// search term, sort order) or on an explicit manual refresh.
+func (c *TeamCache) InvalidateIssues() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.issues = make(map[string][]linearapi.Issue)
+	c.issuesExpiry = make(map[string]time.Time)
+	logger.Debug("cache.team: invalidated all issue caches")
 }
 
 // PreloadTeamMetadata preloads all metadata for a team (users, projects, states, labels).
