@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
@@ -13,12 +15,14 @@ type PickerItem struct {
 
 // PickerModal manages a picker overlay for selecting from a list of items.
 type PickerModal struct {
-	app       *App
-	modal     *tview.Flex
-	list      *tview.List
-	titleView *tview.TextView
-	items     []PickerItem
-	onSelect  func(item PickerItem)
+	app           *App
+	modal         *tview.Flex
+	list          *tview.List
+	titleView     *tview.TextView
+	filterInput   *tview.InputField
+	items         []PickerItem
+	filteredItems []PickerItem
+	onSelect      func(item PickerItem)
 }
 
 // NewPickerModal creates a new picker modal.
@@ -41,9 +45,22 @@ func NewPickerModal(app *App) *PickerModal {
 	pm.titleView.SetTextColor(app.theme.Accent)
 	pm.titleView.SetBackgroundColor(app.theme.HeaderBg)
 
+	// Create filter input
+	pm.filterInput = tview.NewInputField().
+		SetLabel("> ").
+		SetLabelColor(app.theme.Accent).
+		SetFieldTextColor(app.theme.Foreground).
+		SetFieldBackgroundColor(app.theme.HeaderBg).
+		SetPlaceholder("type to filter...").
+		SetPlaceholderTextColor(app.theme.SecondaryText)
+	pm.filterInput.SetBackgroundColor(app.theme.HeaderBg)
+	pm.filterInput.SetChangedFunc(func(text string) {
+		pm.applyFilter(text)
+	})
+
 	// Create help text
 	helpText := tview.NewTextView()
-	helpText.SetText("↑↓/j/k: navigate | Enter: select | Esc: cancel")
+	helpText.SetText("type to filter | ↑↓: navigate | Enter: select | Esc: cancel")
 	helpText.SetTextColor(app.theme.SecondaryText)
 	helpText.SetBackgroundColor(app.theme.HeaderBg)
 
@@ -51,7 +68,8 @@ func NewPickerModal(app *App) *PickerModal {
 	modalContent := tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(pm.titleView, 1, 0, false).
-		AddItem(pm.list, 0, 1, true).
+		AddItem(pm.filterInput, 1, 0, false).
+		AddItem(pm.list, 0, 1, false).
 		AddItem(helpText, 1, 0, false)
 	modalContent.Box = tview.NewBox().SetBackgroundColor(app.theme.HeaderBg)
 	modalContent.SetBackgroundColor(app.theme.HeaderBg).
@@ -61,13 +79,13 @@ func NewPickerModal(app *App) *PickerModal {
 	padding := app.density.ModalPadding
 	modalContent.SetBorderPadding(padding.Top, padding.Bottom, padding.Left, padding.Right)
 
-	// Center the modal on screen
+	// Center the modal on screen — height 17 to fit title + filter + list + help
 	pm.modal = tview.NewFlex().
 		AddItem(nil, 0, 1, false).
 		AddItem(tview.NewFlex().
 			SetDirection(tview.FlexRow).
 			AddItem(nil, 0, 1, false).
-			AddItem(modalContent, 15, 0, true).
+			AddItem(modalContent, 17, 0, true).
 			AddItem(nil, 0, 1, false), 50, 0, true).
 		AddItem(nil, 0, 1, false)
 	pm.modal.SetBackgroundColor(app.theme.Background)
@@ -75,12 +93,35 @@ func NewPickerModal(app *App) *PickerModal {
 	return pm
 }
 
+// applyFilter re-builds the list based on the current filter text.
+func (pm *PickerModal) applyFilter(query string) {
+	query = strings.ToLower(strings.TrimSpace(query))
+	pm.filteredItems = pm.filteredItems[:0]
+
+	for _, item := range pm.items {
+		if query == "" || strings.Contains(strings.ToLower(item.Label), query) {
+			pm.filteredItems = append(pm.filteredItems, item)
+		}
+	}
+
+	pm.list.Clear()
+	for _, item := range pm.filteredItems {
+		pm.list.AddItem(item.Label, "", 0, nil)
+	}
+	if len(pm.filteredItems) > 0 {
+		pm.list.SetCurrentItem(0)
+	}
+}
+
 // Show displays the picker modal with the given title and items.
 func (pm *PickerModal) Show(title string, items []PickerItem, onSelect func(item PickerItem)) {
 	pm.items = items
+	pm.filteredItems = make([]PickerItem, len(items))
+	copy(pm.filteredItems, items)
 	pm.onSelect = onSelect
 
 	pm.titleView.SetText(title)
+	pm.filterInput.SetText("")
 	pm.list.Clear()
 
 	for _, item := range items {
@@ -93,7 +134,7 @@ func (pm *PickerModal) Show(title string, items []PickerItem, onSelect func(item
 
 	pm.app.pages.AddPage("picker", pm.modal, true, true)
 	pm.app.pages.SendToFront("picker")
-	pm.app.app.SetFocus(pm.list)
+	pm.app.app.SetFocus(pm.filterInput)
 }
 
 // Hide hides the picker modal.
@@ -130,8 +171,8 @@ func (pm *PickerModal) HandleKey(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyEnter:
 		idx := pm.list.GetCurrentItem()
-		if idx >= 0 && idx < len(pm.items) {
-			item := pm.items[idx]
+		if idx >= 0 && idx < len(pm.filteredItems) {
+			item := pm.filteredItems[idx]
 			pm.Hide()
 			if pm.onSelect != nil {
 				pm.onSelect(item)
@@ -150,22 +191,9 @@ func (pm *PickerModal) HandleKey(event *tcell.EventKey) *tcell.EventKey {
 			pm.list.SetCurrentItem(idx + 1)
 		}
 		return nil
-	case tcell.KeyRune:
-		switch event.Rune() {
-		case 'j':
-			idx := pm.list.GetCurrentItem()
-			if idx < pm.list.GetItemCount()-1 {
-				pm.list.SetCurrentItem(idx + 1)
-			}
-			return nil
-		case 'k':
-			idx := pm.list.GetCurrentItem()
-			if idx > 0 {
-				pm.list.SetCurrentItem(idx - 1)
-			}
-			return nil
-		}
 	}
+	// Forward all other keys (runes, backspace, etc.) to the filter input so
+	// typing immediately filters the list.
 	return event
 }
 
